@@ -47,12 +47,16 @@ def n(c):
 
 
 def csv(path, **kw):
-    opts = ", ".join(f"{k}={v}" for k, v in {"header": "true", "all_varchar": "true", **kw}.items())
+    """Standard CSV. Quote/escape are set explicitly: DuckDB's sniffer only looks at
+    the first rows and misses quoted fields further down (e.g. GloNAF line 192702)."""
+    base = {"header": "true", "all_varchar": "true", "delim": "','",
+            "quote": "'\"'", "escape": "'\"'"}
+    opts = ", ".join(f"{k}={v}" for k, v in {**base, **kw}.items())
     return f"read_csv('{path}', {opts})"
 
 
 def tsv(path):
-    return csv(path, delim="'\t'", quote="''")
+    return csv(path, delim="'\t'", quote="''", escape="''")
 
 
 def pick(con, rel, *candidates):
