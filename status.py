@@ -67,6 +67,9 @@ FILES = [
     ("plant_index.parquet", ["plant_index.parquet"], "wanted", "run build_index.py"),
     ("ranges.parquet", ["ranges.parquet"], "wanted", "run build_ranges.py"),
     ("plant_index_bhl.parquet", ["plant_index_bhl.parquet"], "wanted", "run bhl_build.py"),
+    ("plant_books.parquet", ["plant_books.parquet"], "wanted", "run build_books.py (#4)"),
+    ("seed/nl_places.csv", ["../seed/nl_places.csv"], "wanted",
+     "curated Dutch imprint places, committed in seed/ - build_books.py needs it (#4)"),
 ]
 
 # tables: name, what it is for, level (as above)
@@ -85,6 +88,8 @@ TABLES = [
     ("bhl_titles", "BHL titles (LanguageCode, PublicationDetails)", "wanted"),
     ("bhl_name_summary", "pages/titles per BHL name", "wanted"),
     ("plant_index_bhl", "index + literature counts", "wanted"),
+    ("plant_books", "plant name x BHL title (#4)", "wanted"),
+    ("plant_books_full", "plant_books + title/copy text", "wanted"),
     ("wikidata_ids", "parked (issue #2)", "parked"),
     ("wikidata_common_names", "parked (issue #2)", "parked"),
 ]
@@ -337,6 +342,59 @@ def check_bhl(con):
     return out
 
 
+def check_books(con):
+    """plant_books: plant name x BHL title, and the two Dutch flags (#4)."""
+    if not has_table(con, "plant_books"):
+        return [("warn", "plant_books", None, "not built -> run build_books.py (#4)")]
+    out = []
+    rows, names, titles, wfo = con.execute(
+        "SELECT count(*), count(DISTINCT nname), count(DISTINCT title_id), count(wfo_id) "
+        "FROM plant_books").fetchone()
+    out.append(("ok", "plant_books", rows,
+                f"{human(names)} names x {human(titles)} titles, "
+                f"{pct(wfo, rows)} of the rows resolve to one WFO record "
+                "(the rest are homonyms or names plant_index does not hold)"))
+    # one row per name x title, never two
+    dup = one(con, "SELECT count(*) FROM (SELECT nname, title_id, count(*) c FROM plant_books "
+                   "GROUP BY 1, 2 HAVING count(*) > 1)", default=0)
+    out.append(("ok" if not dup else "fail", "plant_books key", dup,
+                "duplicate (name, title) rows - must be 0"))
+    # same titles as the independent summary: a cheap agreement check between two builds
+    if has_table(con, "bhl_name_summary"):
+        bad = one(con, """SELECT count(*) FROM (SELECT nname, bhl_titles t FROM bhl_name_summary) s
+            JOIN (SELECT nname, count(*) t FROM plant_books GROUP BY 1) b USING (nname)
+            WHERE s.t <> b.t""", default=0)
+        out.append(("ok" if not bad else "warn", "plant_books vs bhl_name_summary", bad,
+                    "names whose title count disagrees between the two builds - must be 0 "
+                    "(their page counts differ on purpose: the summary counts distinct pages, "
+                    "plant_books sums them over digitised copies)"))
+    if has_col(con, "plant_books", "dutch"):
+        mix = con.execute("SELECT dutch, count(DISTINCT title_id) FROM plant_books "
+                          "GROUP BY 1 ORDER BY 2 DESC").fetchall()
+        by_title = {d: t for d, t in mix}
+        flagged = sum(t for d, t in mix if d)
+        out.append(("ok", "Dutch flags", flagged,
+                    "titles flagged: "
+                    + ", ".join((f"{d or 'none'} {human(t)}") for d, t in mix)
+                    + " - dutch_language is LanguageCode DUT/NLA, dutch_published matches an "
+                      "imprint place in seed/nl_places.csv; most books printed in the "
+                      "Netherlands are Latin, not Dutch, so filtering on language alone "
+                      "misses most of them"))
+        if not by_title.get("published") and not by_title.get("both"):
+            out.append(("warn", "Dutch imprints", 0,
+                        "no title matched seed/nl_places.csv - check the pattern list"))
+        places = DATA.parent / "seed" / "nl_places.csv"
+        if places.exists():
+            n_pat = len(places.read_text(encoding="utf-8").strip().splitlines()) - 1
+            out.append(("ok", "nl_places.csv", n_pat,
+                        "curated imprint patterns (Latin forms matter: Amstelodami, "
+                        "Lugduni Batavorum, Trajecti); Antwerp/Antverpiae is deliberately "
+                        "not counted as the Netherlands"))
+        else:
+            out.append(("warn", "nl_places.csv", None, f"missing -> {places}"))
+    return out
+
+
 def check_matching(con):
     """How much of the index can be matched by name alone - drives every fallback."""
     if not has_table(con, "plant_index"):
@@ -371,6 +429,7 @@ SECTIONS = [
     ("Cross-reference integrity", check_links),
     ("Distribution ranges", check_ranges),
     ("BHL literature", check_bhl),
+    ("Books per plant (#4)", check_books),
     ("Matching notes", check_matching),
     ("Parked - decided against, not bugs", check_parked),
 ]

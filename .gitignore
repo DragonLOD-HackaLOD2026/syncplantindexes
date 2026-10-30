@@ -1,7 +1,11 @@
 *.bz2
 Qleverfile
 wikidata.download-log.txt
+# downloaded / generated data, rebuildable from scratch - never commit
 plant_data
+
+# hand-curated reference tables the scripts read (nl_places.csv, later pathways_nl.csv)
+# are committed on purpose - do NOT add 'seed/' above
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

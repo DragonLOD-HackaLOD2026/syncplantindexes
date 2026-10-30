@@ -28,6 +28,13 @@ already done, and no download or conversion is ever repeated unless you delete i
  GRIIS               ─┘                                  invasive status + first record year
 
  status.py      ─── reads everything above and prints/writes a quality scorecard
+
+ plant_index ──┐
+ bhl + seed/  ──┴──► build_books.py ──► plant_books     one row per *plant name × BHL title*:
+                                     (DuckDB + Parquet)  pages, copies, years, and the two
+                                                         Dutch flags (language / imprint)
+
+ plant_query.py ── read-only Python questions over all of it: plants(), books()
 ```
 
 <sub>\* Wikidata is **parked** (issue #2): the QLever fetch is switched off, so the
@@ -37,10 +44,11 @@ Wikidata columns exist but stay empty. Nothing else in the pipeline needs them.<
 
 | Output | What it is |
 |---|---|
-| `plant_data/plant_index.duckdb` | All raw source tables plus the final `plant_index`, `plant_index_bhl` and `ranges` |
+| `plant_data/plant_index.duckdb` | All raw source tables plus the final `plant_index`, `plant_index_bhl`, `ranges` and `plant_books` |
 | `plant_data/plant_index.parquet` | `plant_index` as a single Parquet file (easy for pandas/polars/DuckDB anywhere) |
 | `plant_data/plant_index_bhl` (table + `.parquet`) | `plant_index` enriched with BHL literature counts per name |
 | `plant_data/ranges.parquet` | `ranges`: who lives where — native / introduced / naturalized / invasive per taxon × region × source |
+| `plant_data/plant_books.parquet` | `plant_books`: which BHL title mentions which plant name, how many pages, when, and whether the book is Dutch |
 | `plant_data/quality_report.md` | The `status.py` scorecard: what is loaded, coverage per id, broken links, and how to fix each gap |
 | `plant_data/bhl/*.parquet` | The slim BHL tables (only the columns needed) |
 
@@ -54,6 +62,28 @@ Every build script ends with a coverage summary (how many names got each id, how
 range rows link to WFO, how many names are in BHL), so you can see at a glance how well
 the linking worked.
 
+Each `plant_books` row is one *plant name × BHL title*: `pages` (page mentions, summed over
+all digitised **copies** — `copies` says how many), `first_year`/`last_year` of the pages
+mentioning it, the title's `language_code`, `publication_details` and `published_place`,
+plus the two Dutch flags. Title text (full title, author of the book, call number, holding
+institution, URLs) is not duplicated across the 27 M rows; the view `plant_books_full`
+joins it when you want it.
+
+**"Dutch books" is two different questions**, so `plant_books` keeps both flags:
+
+| flag | meaning | BHL titles |
+|---|---|---:|
+| `dutch_language` | `LanguageCode IN ('DUT','NLA')` | 435 |
+| `dutch_published` | imprint place in `seed/nl_places.csv` (`Amstelodami`, `Lugduni Batavorum`, `Trajecti`, …) | 988 |
+| `dutch` | `'both'` / `'language'` / `'published'` / `''` | 838 flagged in total |
+
+Most books printed in the Netherlands are **Latin**, not Dutch — filtering on language
+alone misses most of them, and the Latin imprint forms are what find them. Antwerp
+(*Antverpiae*) is deliberately **not** counted as the Netherlands.
+
+`seed/` holds hand-curated reference tables that the scripts read (committed on purpose,
+unlike the gitignored `plant_data/`); `seed/README.md` explains each one.
+
 ## The scripts, in the order you'd run them
 
 | Script | What it does | Time / space |
@@ -63,7 +93,9 @@ the linking worked.
 | `bhl_fetch.py` | Downloads BHL's monthly TSV export (~2.5 GB zip) and extracts the four tables needed: `pagename`, `page`, `item`, `title` | ~15 GB unpacked |
 | `bhl_build.py` | Converts the BHL TSVs to slim Parquet, keeps only names present in `plant_index`, and builds `bhl_name_summary` + `plant_index_bhl` | tens of minutes, DuckDB capped at 4 threads / 8 GB and spills to disk |
 | `build_ranges.py` | Stacks the four distribution sources into one long `ranges` table linked back to `plant_index` — by WCVP id, else name+author, else name+author ignoring the parenthetical author, else unique exact name (`link_src` says which). Skips SInAS/GRIIS with a message while their files are missing | seconds to minutes; rebuilt from scratch on every run |
+| `build_books.py` | Folds the 217 M BHL name-page rows into `plant_books`, one row per plant name × title, with the Dutch language/imprint flags from `seed/nl_places.csv` | ~3 min, staged temp tables so each step can spill to disk |
 | `status.py` | **Quality check**: prints a scorecard of every source file, table, id coverage, and cross-reference (and writes `plant_data/quality_report.md`). Read-only, so run it as often as you like; exit code 1 means something failed | seconds |
+| `plant_query.py` | The questions as Python functions: `plants(name_or_id)`, `books(name, dutch=…)`. Read-only, resolves names and ids, suggests close names on a typo | about a second per question |
 
 ```bash
 python download.py        # one-time data setup
@@ -71,6 +103,7 @@ python build_index.py     # the cross-reference index
 python bhl_fetch.py       # BHL raw data
 python bhl_build.py       # literature counts
 python build_ranges.py    # native / introduced / invasive per region
+python build_books.py     # which books mention which plant (and which are Dutch)
 python status.py          # what is in there, and did it join well?
 ```
 
@@ -97,6 +130,7 @@ python status.py          # what is in there, and did it join well?
 | SInAS 3.2 | `SInAS_3.2.csv` into `plant_data/sinas/` — [Zenodo 21933976](https://zenodo.org/records/21933976); **space-delimited** despite the `.csv` name, and it covers every kingdom, so only rows whose name is in `plant_index` are kept |
 | GRIIS Netherlands | Darwin Core Archive zip into `plant_data/griis/` — [cloud.gbif.org/griis/resource?r=griis-nl](https://cloud.gbif.org/griis/resource?r=griis-nl), unpacked once by `build_ranges.py` |
 | IPNI ids | extracted from WFO's `scientificNameID` LSIDs — no separate download |
+| Dutch imprint places | hand-curated `seed/nl_places.csv` — no source lists where a book was printed, so this list *is* the curation |
 
 SInAS and GRIIS checklists round out the distribution data; their download links (and what
 they actually contain) are in `sources.md`. Drop the files into `plant_data/sinas/` and
@@ -112,11 +146,23 @@ column and no arrival dates (`eventDate` filled for 1 of 376 rows).
 
 ## Playing with the result
 
+The shortest route is `plant_query.py` (read-only, so it is safe while a build runs):
+
+```python
+from plant_query import plants, books
+
+plants("Typha latifolia")                    # ids, family, megatree flag
+books("Typha latifolia")                     # every BHL title mentioning it
+books("Typha latifolia", dutch=True)         # anything Dutch: 47 titles for Typha
+books("Quercus robur", dutch="published")    # printed in the Netherlands only
+books("Quercus roburr")                      # LookupError: closest is Quercus robur
+```
+
+Or straight SQL (open the DB read-only, or use the Parquet files):
+
 ```bash
 python -c "import duckdb; duckdb.sql(\"SELECT * FROM 'plant_data/plant_index.parquet' LIMIT 5\").show()"
 ```
-
-Or some friendly SQL (open the DB read-only, or use the Parquet file):
 
 ```sql
 -- everything the index knows about a genus, including literature counts
@@ -144,6 +190,18 @@ FROM ranges WHERE invasive GROUP BY 1, 2 ORDER BY regions DESC LIMIT 10;
 SELECT source, region_code, status, invasive, first_record_year, link_src
 FROM ranges
 WHERE name = 'Rosa rugosa' AND region_code IN ('NET', 'NLD', 'NL', '184');
+
+-- which Dutch books mention this plant? use `dutch <> ''`: most books printed in the
+-- Netherlands are Latin-language, so filtering LanguageCode = 'DUT' alone misses most
+SELECT short_title, author_of_book, language_code, published_place, dutch,
+       pages, first_year, last_year
+FROM plant_books_full
+WHERE nname = 'typha latifolia' AND dutch <> ''
+ORDER BY pages DESC;
+
+-- the best-documented plants in Dutch books
+SELECT nname, count(DISTINCT title_id) AS dutch_titles, sum(pages) AS pages
+FROM plant_books WHERE dutch <> '' GROUP BY 1 ORDER BY dutch_titles DESC LIMIT 10;
 ```
 
 ## Re-running, redoing, resetting
