@@ -24,8 +24,8 @@ already done, and no download or conversion is ever repeated unless you delete i
 
  WCVP distributions ─┐
  GloNAF              ─┼──► build_ranges.py ──► ranges    long table: one row per taxon × region
- SInAS (optional)    ─┤      (DuckDB + Parquet)           × source, with native/introduced/
- GRIIS (optional)    ─┘                                  invasive status + first record year
+ SInAS               ─┤      (DuckDB + Parquet)           × source, with native/introduced/
+ GRIIS               ─┘                                  invasive status + first record year
 
  status.py      ─── reads everything above and prints/writes a quality scorecard
 ```
@@ -62,7 +62,7 @@ the linking worked.
 | `build_index.py` | Loads every source into DuckDB and builds `plant_index` with all the cross-links | minutes |
 | `bhl_fetch.py` | Downloads BHL's monthly TSV export (~2.5 GB zip) and extracts the four tables needed: `pagename`, `page`, `item`, `title` | ~15 GB unpacked |
 | `bhl_build.py` | Converts the BHL TSVs to slim Parquet, keeps only names present in `plant_index`, and builds `bhl_name_summary` + `plant_index_bhl` | tens of minutes, DuckDB capped at 4 threads / 8 GB and spills to disk |
-| `build_ranges.py` | Stacks the distribution sources into one long `ranges` table linked back to `plant_index` (by WCVP id where available, else unique exact name). SInAS and GRIIS are skipped until their files are in `plant_data/` (links in `sources.md`) | seconds to minutes; rebuilt from scratch on every run |
+| `build_ranges.py` | Stacks the four distribution sources into one long `ranges` table linked back to `plant_index` — by WCVP id, else name+author, else name+author ignoring the parenthetical author, else unique exact name (`link_src` says which). Skips SInAS/GRIIS with a message while their files are missing | seconds to minutes; rebuilt from scratch on every run |
 | `status.py` | **Quality check**: prints a scorecard of every source file, table, id coverage, and cross-reference (and writes `plant_data/quality_report.md`). Read-only, so run it as often as you like; exit code 1 means something failed | seconds |
 
 ```bash
@@ -94,12 +94,21 @@ python status.py          # what is in there, and did it join well?
 | ~~Wikidata ids + common names~~ | **parked** (issue #2) — the QLever query is written and disabled (`WIKIDATA = False`); those columns stay empty on purpose |
 | BHL | monthly TSV export at <https://www.biodiversitylibrary.org/data/TSV/data.zip> |
 | GloNAF 2.02 | manual download into `plant_data/glonaf/` (`glonaf_flora2`, `glonaf_taxon_wcvp`, `glonaf_region` are the three files used) |
+| SInAS 3.2 | `SInAS_3.2.csv` into `plant_data/sinas/` — [Zenodo 21933976](https://zenodo.org/records/21933976); **space-delimited** despite the `.csv` name, and it covers every kingdom, so only rows whose name is in `plant_index` are kept |
+| GRIIS Netherlands | Darwin Core Archive zip into `plant_data/griis/` — [cloud.gbif.org/griis/resource?r=griis-nl](https://cloud.gbif.org/griis/resource?r=griis-nl), unpacked once by `build_ranges.py` |
 | IPNI ids | extracted from WFO's `scientificNameID` LSIDs — no separate download |
 
-SInAS and GRIIS checklists round out the distribution data; their download links are in
-`sources.md`. Drop the files into `plant_data/sinas/` and `plant_data/griis/` and
-`build_ranges.py` picks them up automatically — until then it just skips them with a
-friendly message.
+SInAS and GRIIS checklists round out the distribution data; their download links (and what
+they actually contain) are in `sources.md`. Drop the files into `plant_data/sinas/` and
+`plant_data/griis/` and `build_ranges.py` picks them up automatically — until then it just
+skips them with a friendly message.
+
+What they add, measured: WCVP gives native/introduced for 3,866 taxa in the Netherlands
+(TDWG level 3 `NET`), GloNAF 433 naturalized/invasive (`NLD`), GRIIS-NL 235 introduced
+species (`NL`), SInAS 2,323 taxa with first-record years 1599–2019 (`184`). Two honest gaps:
+SInAS has a `pathway` column with a proper controlled vocabulary, but every one of its 2,810
+filled rows is an **animal** — no plant pathways anywhere — and GRIIS-NL has no pathway
+column and no arrival dates (`eventDate` filled for 1 of 376 rows).
 
 ## Playing with the result
 
@@ -128,6 +137,13 @@ FROM ranges WHERE name ILIKE 'Heracleum%mantegazzian%';
 -- most invasive species per distribution source
 SELECT source, name, count(*) AS regions
 FROM ranges WHERE invasive GROUP BY 1, 2 ORDER BY regions DESC LIMIT 10;
+
+-- is it an alien in the Netherlands, and which source says so?
+-- (region codes only: NET = TDWG level 3, NLD = GloNAF, NL = GRIIS, 184 = SInAS;
+--  ILIKE '%netherlands%' would also pull in Netherlands Antilles)
+SELECT source, region_code, status, invasive, first_record_year, link_src
+FROM ranges
+WHERE name = 'Rosa rugosa' AND region_code IN ('NET', 'NLD', 'NL', '184');
 ```
 
 ## Re-running, redoing, resetting

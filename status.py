@@ -56,10 +56,10 @@ FILES = [
     ("BHL export", ["bhl/title.txt", "bhl/pagename.txt"], "wanted", "run bhl_fetch.py"),
     ("GloNAF", ["glonaf/glonaf_flora2.csv", "glonaf/glonaf_taxon_wcvp.csv",
                 "glonaf/glonaf_region.csv"], "wanted", "see sources.md (#3)"),
-    ("SInAS", ["sinas"], "later",
-     "SInAS_3.2.csv from zenodo.org/records/21933976 into plant_data/sinas/, "
-     "then build_ranges.py (#3)"),
-    ("GRIIS Netherlands", ["griis"], "later",
+    ("SInAS", ["sinas/SInAS_*.csv"], "wanted",
+     "SInAS_3.2.csv from zenodo.org/records/21933976 into plant_data/sinas/, then "
+     "build_ranges.py (#3)"),
+    ("GRIIS Netherlands", ["griis/*.zip"], "wanted",
      "checklist from cloud.gbif.org/griis/resource?r=griis-nl into plant_data/griis/ (#3)"),
     ("GBIF occurrences (NL)", ["occurrences_nl.parquet", "observations_nl.parquet"], "later",
      "build_obs.py, not written yet (#7)"),
@@ -131,9 +131,15 @@ def pct(part, whole):
 def check_files(con):
     out = []
     for label, names, level, fix in FILES:
-        found = [x for x in names if (DATA / x).exists()]
+        found = [x for x in names if (DATA / x).exists() or list(DATA.glob(x))]
         if found:
             p = DATA / found[0]
+            if not p.exists():                       # a glob pattern: report the matches
+                hits = sorted(DATA.glob(found[0]))
+                detail = f"{found[0]} ({len(hits)} file(s), " \
+                         f"{sum(h.stat().st_size for h in hits) / 1e6:.0f} MB)"
+                out.append(("ok", label, None, detail))
+                continue
             if p.is_dir():
                 detail = f"{found[0]}/ ({sum(1 for f in p.rglob('*') if f.is_file())} files)"
             else:
@@ -264,6 +270,38 @@ def check_ranges(con):
         if missing not in present:
             out.append(("warn", f"ranges:{missing}", None,
                         f"source absent from ranges (files not downloaded) - see {issue}"))
+    if has_col(con, "ranges", "link_src"):
+        mix = con.execute("SELECT coalesce(link_src, 'unlinked'), count(*) FROM ranges "
+                          "GROUP BY 1 ORDER BY 2 DESC").fetchall()
+        out.append(("ok", "how ranges linked", None,
+                    ", ".join(f"{s} {human(c)}" for s, c in mix)
+                    + " (unlinked WCVP rows are names the WFO backbone does not hold)"))
+    # what the Netherlands looks like in each source: the number #5 #6 #7 depend on
+    nl = con.execute("""SELECT source, count(*), count(DISTINCT coalesce(wfo_id, name)) taxa
+        FROM ranges WHERE region_code IN ('NET', 'NLD', 'NL', '184') GROUP BY 1 ORDER BY 1""").fetchall()
+    if nl:
+        out.append(("ok", "ranges:Netherlands", None,
+                    ", ".join(f"{s} {human(r)} rows/{human(t)} taxa" for s, r, t in nl)
+                    + " (region codes NET/NLD/NL/184 - never ILIKE '%netherlands%', which "
+                      "also returns Netherlands Antilles)"))
+    # SInAS has a pathway column, but for plants it is empty - matters for #6
+    path = one(con, "SELECT count(pathway) FROM ranges", default=0)
+    if path == 0 and "sinas" in present:
+        out.append(("warn", "ranges:pathway", 0,
+                    "no pathway values for any plant: SInAS fills pathway for 2,810 rows, "
+                    "all of them animals, and GRIIS-NL has no pathway column (its metadata "
+                    "says pathways are 'planned') -> #6 needs a curated seed table"))
+    # GloNAF records are per synonym, so one taxon x region can appear many times with
+    # different statuses. Not a bug, but the derived status table (#5) must aggregate.
+    if has_col(con, "ranges", "wfo_id"):
+        dup = con.execute("""SELECT count(*) FILTER (WHERE n > 1), count(*) FILTER (WHERE c > 1)
+            FROM (SELECT wfo_id, region_code, count(*) n, count(DISTINCT status) c FROM ranges
+                  WHERE source = 'glonaf' AND wfo_id IS NOT NULL GROUP BY 1, 2)""").fetchone()
+        if dup[0]:
+            out.append(("ok", "ranges:glonaf duplicates", None,
+                        f"{human(dup[0])} taxon x region pairs have several records "
+                        f"({human(dup[1])} disagree on status, e.g. naturalized vs invasive) - "
+                        "GloNAF records are per synonym, so nl_status (#5) aggregates them"))
     return out
 
 
