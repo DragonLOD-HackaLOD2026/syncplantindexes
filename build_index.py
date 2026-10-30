@@ -114,7 +114,7 @@ def extract_gbif_plantae():
         log("skip", out.name)
         return
     with zipfile.ZipFile(DATA / "gbif_backbone.zip") as z:
-        member = next((n for n in z.namelist() if n.lower().endswith("taxon.tsv"Can)), None)
+        member = next((n for n in z.namelist() if n.lower().endswith("taxon.tsv")), None)
         if member is None:
             raise SystemExit(f"No Taxon.tsv in gbif_backbone.zip. Members: {z.namelist()}")
         log("filtering Plantae from", member, "(a few minutes)")
