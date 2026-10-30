@@ -16,7 +16,7 @@ already done, and no download or conversion is ever repeated unless you delete i
  WCVP (POWO)  ─┤
  GBIF backbone─┼──► build_index.py ──► plant_index        one row per WFO name:
  NCBI taxonomy─┤                       (DuckDB + Parquet)  WFO/IPNI/POWO/WCVP/Wikidata/GBIF/NCBI ids,
- Wikidata     ─┤                                           megatree tip flag, provenance
+ Wikidata*    ─┤                                           megatree tip flag, provenance
  megatree     ─┘
                                      bhl_fetch.py ──► BHL TSV export (4 big tables)
  BHL books    ──── bhl_fetch.py ────► bhl_build.py ──► plant_index_bhl
@@ -26,7 +26,12 @@ already done, and no download or conversion is ever repeated unless you delete i
  GloNAF              ─┼──► build_ranges.py ──► ranges    long table: one row per taxon × region
  SInAS (optional)    ─┤      (DuckDB + Parquet)           × source, with native/introduced/
  GRIIS (optional)    ─┘                                  invasive status + first record year
+
+ status.py      ─── reads everything above and prints/writes a quality scorecard
 ```
+
+<sub>\* Wikidata is **parked** (issue #2): the QLever fetch is switched off, so the
+Wikidata columns exist but stay empty. Nothing else in the pipeline needs them.</sub>
 
 ## What you get
 
@@ -36,13 +41,14 @@ already done, and no download or conversion is ever repeated unless you delete i
 | `plant_data/plant_index.parquet` | `plant_index` as a single Parquet file (easy for pandas/polars/DuckDB anywhere) |
 | `plant_data/plant_index_bhl` (table + `.parquet`) | `plant_index` enriched with BHL literature counts per name |
 | `plant_data/ranges.parquet` | `ranges`: who lives where — native / introduced / naturalized / invasive per taxon × region × source |
+| `plant_data/quality_report.md` | The `status.py` scorecard: what is loaded, coverage per id, broken links, and how to fix each gap |
 | `plant_data/bhl/*.parquet` | The slim BHL tables (only the columns needed) |
 
 Each `plant_index` row: WFO id, name, author, rank, status, accepted name, family, IPNI id,
-WCVP/POWO ids, Wikidata QID, GBIF id, NCBI taxid, `in_megatree` (is it a tip of the
-GBOTB megatree?), and `*_src` columns saying **how** each id was found
-(`"wikidata"` = linked on the same Wikidata item, `"name"` / `"name+author"` = unique
-exact name match — homonyms are never matched by name alone).
+WCVP/POWO ids, Wikidata QID (empty — parked, see below), GBIF id, NCBI taxid, `in_megatree`
+(is it a tip of the GBOTB megatree?), and `*_src` columns saying **how** each id was found
+(`"name+author"` / `"name"` = unique exact name match — homonyms are never matched by name
+alone; the `"wikidata"` value exists in the schema but never fires, issue #2).
 
 Every build script ends with a coverage summary (how many names got each id, how many
 range rows link to WFO, how many names are in BHL), so you can see at a glance how well
@@ -57,6 +63,7 @@ the linking worked.
 | `bhl_fetch.py` | Downloads BHL's monthly TSV export (~2.5 GB zip) and extracts the four tables needed: `pagename`, `page`, `item`, `title` | ~15 GB unpacked |
 | `bhl_build.py` | Converts the BHL TSVs to slim Parquet, keeps only names present in `plant_index`, and builds `bhl_name_summary` + `plant_index_bhl` | tens of minutes, DuckDB capped at 4 threads / 8 GB and spills to disk |
 | `build_ranges.py` | Stacks the distribution sources into one long `ranges` table linked back to `plant_index` (by WCVP id where available, else unique exact name). SInAS and GRIIS are skipped until their files are in `plant_data/` (links in `sources.md`) | seconds to minutes; rebuilt from scratch on every run |
+| `status.py` | **Quality check**: prints a scorecard of every source file, table, id coverage, and cross-reference (and writes `plant_data/quality_report.md`). Read-only, so run it as often as you like; exit code 1 means something failed | seconds |
 
 ```bash
 python download.py        # one-time data setup
@@ -64,6 +71,7 @@ python build_index.py     # the cross-reference index
 python bhl_fetch.py       # BHL raw data
 python bhl_build.py       # literature counts
 python build_ranges.py    # native / introduced / invasive per region
+python status.py          # what is in there, and did it join well?
 ```
 
 ## Prerequisites
@@ -72,7 +80,7 @@ python build_ranges.py    # native / introduced / invasive per region
 - R installed (needed for the WCVP data export and the megatree; `rpy2` and the R packages are installed for you)
 - ~25–35 GB free disk for `plant_data/`
 - Optionally a free [GBIF account](https://www.gbif.org) (`GBIF_USER/GBIF_PWD/GBIF_EMAIL`) for the species-list download — skipped if unset
-- Wikidata ids come from a public [QLever](https://qlever.cs.uni-freiburg.de/api/wikidata) endpoint by default; if it's down, the build continues without Wikidata and you can re-run later to add it (or index Wikidata yourself — see below)
+- **No Wikidata.** The QLever fetch is switched off (`WIKIDATA = False` in `build_index.py`) — see *Parked* below. Everything works from WFO/WCVP/GBIF/NCBI ids and unique name matching.
 
 ## Data sources
 
@@ -83,7 +91,7 @@ python build_ranges.py    # native / introduced / invasive per region
 | GBIF backbone | taxonomy archive from `hosted-datasets.gbif.org` |
 | NCBI taxonomy | full taxdump, stored in an ETE SQLite DB (`taxa.sqlite`) |
 | Phylogenetic megatree | `V.PhyloMaker2` (GBOTB extended) → Newick |
-| Wikidata ids + common names | SPARQL/QLever: items with a WFO (P7715) or IPNI (P961) id, then P225/P405/P5037/P846/P685 and P1843 (English/Dutch common names) |
+| ~~Wikidata ids + common names~~ | **parked** (issue #2) — the QLever query is written and disabled (`WIKIDATA = False`); those columns stay empty on purpose |
 | BHL | monthly TSV export at <https://www.biodiversitylibrary.org/data/TSV/data.zip> |
 | GloNAF 2.02 | manual download into `plant_data/glonaf/` (`glonaf_flora2`, `glonaf_taxon_wcvp`, `glonaf_region` are the three files used) |
 | IPNI ids | extracted from WFO's `scientificNameID` LSIDs — no separate download |
@@ -103,7 +111,7 @@ Or some friendly SQL (open the DB read-only, or use the Parquet file):
 
 ```sql
 -- everything the index knows about a genus, including literature counts
-SELECT name, gbif_id, ncbi_taxid, wikidata_qid, bhl_pages, bhl_first_year
+SELECT name, gbif_id, ncbi_taxid, wcvp_id, bhl_pages, bhl_first_year
 FROM plant_index_bhl WHERE name ILIKE 'Typha%';
 
 -- the most-documented plants in BHL
@@ -129,21 +137,21 @@ FROM ranges WHERE invasive GROUP BY 1, 2 ORDER BY regions DESC LIMIT 10;
 - **Full reload of source tables:** set `REBUILD = True` in `build_index.py`.
 - `plant_data/` is git-ignored; delete it wholesale to start from scratch.
 
-## Optional: your own Wikidata (QLever)
+## Parked: Wikidata (QLever)
 
-`Qleverfile` in this repo indexes the complete Wikidata locally (~110 GB compressed,
-~500 GB index — one day of work):
+Decided 2026-10-30 — issue #2 is closed *not planned*: **do not fetch Wikidata.** `WIKIDATA = False`
+in `build_index.py`, so `fetch_wikidata()` prints a skip line and the Wikidata tables stay empty.
+Nothing here needs them: GBIF and NCBI ids come from exact name(+author) matching, and every
+question the repo answers is answerable without Wikidata.
 
-```bash
-pip install qlever
-qlever get-data    # ~7 h
-qlever index       # ~5 h
-qlever start       # then point QLEVER in build_index.py at http://localhost:7001
-```
+`Qleverfile` is kept only as a record of how a local Wikidata index would be built (~110 GB
+compressed, ~500 GB index, about a day of work). Switching it back on is a decision to make,
+not a bug to fix — `status.py` reports Wikidata as `parked`, never as a gap.
 
 ## Known quirks (learned the hard way)
 
 - WFO `classification.csv` contains a few invalid UTF-8 bytes and unbalanced quotes — `build_index.py` cleans a copy once (`wfo_clean.tsv`) rather than dropping rows.
-- GBIF moved its backbone to the Catalogue of Life XR in 2026; Wikidata's GBIF property (P846) refers to the old keys. The index prefers id links where they exist and falls back to unique name(+author) matches, and the `*_src` columns tell you which is which.
+- GBIF moved its backbone to the Catalogue of Life XR in 2026. Our GBIF ids come from the backbone archive, never from Wikidata (parked), so the P846 re-key question does not apply here — but `status.py` still checks that every `gbif_id` in the index actually exists in the `gbif` table.
+- Filtering distributions for the Netherlands must use **region codes**: `region_code = 'NET'` for WCVP (TDWG level 3) and `'NLD'` for GloNAF. `ILIKE '%netherlands%'` also returns *Netherlands Antilles* (`NLA` / `ANT`).
 - WorldFlora's built-in download URL is dead — that's why the WFO backbone comes from Zenodo.
 - ETE and rWCVPdata only download/build when their output is missing; later uses of `taxa.sqlite` should pass `update=False`.

@@ -26,6 +26,7 @@ DB = DATA / "plant_index.duckdb"
 QLEVER = "https://qlever.cs.uni-freiburg.de/api/wikidata"  # or your local QLever
 COMMON_NAME_LANGS = ["en", "nl"]
 REBUILD = False   # True = reload every source table
+WIKIDATA = False  # parked (issue #2): leave Wikidata ids empty, never query QLever
 
 
 def run(con, sql, *params):
@@ -40,7 +41,15 @@ def log(*a):
 
 # --- 1. one-time conversions to plain files (skipped if the output exists) ---
 def fetch_wikidata():
-    """Plant items with their ids, as a long table (item, prop, value)."""
+    """Plant items with their ids, as a long table (item, prop, value).
+
+    Parked (issue #2): WIKIDATA is False, so this returns straight away and the
+    index is built with empty Wikidata tables. Everything downstream (GBIF and
+    NCBI linking, queries) works from name matching instead. Leave it off.
+    """
+    if not WIKIDATA:
+        log("skip wikidata: parked (issue #2) - wikidata_ids stays empty by design")
+        return
     import requests
 
     queries = {
