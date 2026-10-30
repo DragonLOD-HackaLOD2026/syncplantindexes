@@ -35,6 +35,12 @@ TABLES = {
 NORM = "lower(trim(regexp_replace(replace({c}, '×', 'x '), '\\s+', ' ', 'g')))"
 
 
+def run(con, sql, *params):
+    """Execute and fully consume the result (newer DuckDB refuses further
+    work on a connection with an unfinished result)."""
+    return con.execute(sql, *params).fetchall()
+
+
 def log(*a):
     print(*a, flush=True)
 
@@ -43,10 +49,10 @@ def connect():
     tmp = BHL / "duckdb_tmp"
     tmp.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(DB))
-    con.execute(f"SET threads = {THREADS}")
-    con.execute(f"SET memory_limit = '{MEMORY}'")
-    con.execute(f"SET temp_directory = '{tmp}'")
-    con.execute("SET preserve_insertion_order = false")
+    run(con, f"SET threads = {THREADS}")
+    run(con, f"SET memory_limit = '{MEMORY}'")
+    run(con, f"SET temp_directory = '{tmp}'")
+    run(con, "SET preserve_insertion_order = false")
     return con
 
 
@@ -63,7 +69,7 @@ def to_parquet(con):
         log("converting", src.name, "->", out.name)
         sel = ", ".join(f'"{c}"' for c in cols)
         tmp = out.with_suffix(".parquet.part")
-        con.execute(f"""COPY (SELECT {sel} FROM read_csv('{src}', delim='\t', quote='',
+        run(con, f"""COPY (SELECT {sel} FROM read_csv('{src}', delim='\t', quote='',
                          header=true, all_varchar=true, ignore_errors=true))
                         TO '{tmp}' (FORMAT parquet)""")
         tmp.rename(out)
@@ -72,13 +78,13 @@ def to_parquet(con):
 def main():
     con = connect()
     if not con.execute("SELECT count(*) FROM information_schema.tables "
-                       "WHERE table_name = 'plant_index'").fetchone()[0]:
+                       "WHERE table_name = 'plant_index'").fetchall()[0][0]:
         raise SystemExit(f"No plant_index in {DB} - run build_index.py first.")
     to_parquet(con)
 
     p = {n: f"'{BHL / (n + '.parquet')}'" for n in TABLES}
     log("building bhl_name_summary (plant names only)")
-    con.execute(f"""
+    run(con, f"""
     CREATE OR REPLACE TABLE bhl_name_summary AS
     WITH plants AS (SELECT DISTINCT {NORM.format(c='name')} AS nname FROM plant_index),
     hits AS (                      -- filter first: only names in the index
@@ -102,12 +108,12 @@ def main():
     FROM dated
     GROUP BY nname""")
 
-    con.execute(f"""
+    run(con, f"""
     CREATE OR REPLACE TABLE plant_index_bhl AS
     SELECT x.*, b.bhl_pages, b.bhl_titles, b.bhl_first_year, b.bhl_last_year
     FROM plant_index x
     LEFT JOIN bhl_name_summary b ON b.nname = {NORM.format(c='x.name')}""")
-    con.execute(f"COPY plant_index_bhl TO '{DATA / 'plant_index_bhl.parquet'}' (FORMAT parquet)")
+    run(con, f"COPY plant_index_bhl TO '{DATA / 'plant_index_bhl.parquet'}' (FORMAT parquet)")
     log(con.execute("""SELECT count(*) names, count(bhl_pages) in_bhl,
                        min(bhl_first_year) earliest FROM plant_index_bhl""").df().to_string(index=False))
     con.close()

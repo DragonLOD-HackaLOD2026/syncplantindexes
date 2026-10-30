@@ -28,6 +28,12 @@ COMMON_NAME_LANGS = ["en", "nl"]
 REBUILD = False   # True = reload every source table
 
 
+def run(con, sql, *params):
+    """Execute and fully consume the result (newer DuckDB refuses further
+    work on a connection with an unfinished result)."""
+    return con.execute(sql, *params).fetchall()
+
+
 def log(*a):
     print(*a, flush=True)
 
@@ -134,7 +140,7 @@ def extract_gbif_plantae():
 # --- 2. load tables into DuckDB (skipped if the table exists) -----------------
 def has_table(con, name):
     return con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-                       [name]).fetchone()[0] > 0
+                       [name]).fetchall()[0][0] > 0
 
 
 def load(con, name, sql_or_fn):
@@ -145,31 +151,58 @@ def load(con, name, sql_or_fn):
     if callable(sql_or_fn):
         sql_or_fn(con)
     else:
-        con.execute(f"CREATE OR REPLACE TABLE {name} AS {sql_or_fn}")
+        run(con, f"CREATE OR REPLACE TABLE {name} AS {sql_or_fn}")
 
 
 def load_optional(con, name, path, sql, empty_cols):
     """Load from file if present; otherwise an empty placeholder table, which is
     replaced automatically on a later run once the file exists."""
     if path.exists():
-        empty = has_table(con, name) and con.execute(f"SELECT count(*) FROM {name}").fetchone()[0] == 0
+        empty = has_table(con, name) and con.execute(f"SELECT count(*) FROM {name}").fetchall()[0][0] == 0
         if has_table(con, name) and not empty and not REBUILD:
             log("skip table", name)
             return
         log("loading table", name)
-        con.execute(f"CREATE OR REPLACE TABLE {name} AS {sql}")
+        run(con, f"CREATE OR REPLACE TABLE {name} AS {sql}")
     elif not has_table(con, name):
         log(f"no {path.name} - empty {name} table for now")
         cols = ", ".join(f"{c} VARCHAR" for c in empty_cols)
-        con.execute(f"CREATE TABLE {name} ({cols})")
+        run(con, f"CREATE TABLE {name} ({cols})")
 
 
-def read_tsv_or_csv(path):
-    """WFO's classification.csv may be tab-separated despite the name."""
-    first = open(path, encoding="utf-8", errors="replace").readline()
-    if "\t" in first:
-        return f"read_csv('{path}', delim='\t', quote='', header=true, all_varchar=true)"
-    return f"read_csv('{path}', header=true, all_varchar=true)"
+def clean_wfo():
+    """classification.csv has a few invalid UTF-8 bytes (truncated text fields).
+    Write a cleaned copy once; bad bytes become U+FFFD, no rows are lost."""
+    src, out = DATA / "classification.csv", DATA / "wfo_clean.tsv"
+    if out.exists():
+        log("skip", out.name)
+        return out
+    log("cleaning classification.csv -> wfo_clean.tsv (about a minute)")
+    tmp = out.with_suffix(".part")
+    bad = 0
+    with open(src, "rb") as f, open(tmp, "w", encoding="utf-8", newline="") as g:
+        for raw in f:
+            try:
+                line = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                line, bad = raw.decode("utf-8", errors="replace"), bad + 1
+            g.write(line)
+    tmp.rename(out)
+    log(f"   {bad} lines had invalid bytes (kept, bad bytes replaced)")
+    return out
+
+
+def load_wfo(con):
+    """Tab-separated; some fields are wrapped in double quotes and some quotes are
+    unbalanced (truncated), so read without quoting and strip quotes per column.
+    Malformed rows are kept aside in DuckDB's reject tables and counted."""
+    path = clean_wfo()
+    run(con, f"""CREATE OR REPLACE TABLE wfo_raw AS
+        SELECT trim(COLUMNS(*), '"') FROM read_csv('{path}', delim='\t', quote='',
+            header=true, all_varchar=true, store_rejects=true)""")
+    rejected = con.execute("SELECT count(*) FROM reject_errors").fetchall()[0][0]
+    log(f"   wfo_raw: {con.execute('SELECT count(*) FROM wfo_raw').fetchall()[0][0]} rows, "
+        f"{rejected} malformed rows skipped")
 
 
 def load_ncbi(con):
@@ -184,7 +217,7 @@ def load_ncbi(con):
         JOIN species s USING (taxid) WHERE {plants.replace('track', 's.track')}""", s)
     s.close()
     con.register("ncbi_df", names)
-    con.execute("CREATE OR REPLACE TABLE ncbi AS SELECT * FROM ncbi_df")
+    run(con, "CREATE OR REPLACE TABLE ncbi AS SELECT * FROM ncbi_df")
     con.unregister("ncbi_df")
 
 
@@ -192,7 +225,7 @@ def load_megatree(con):
     text = (DATA / "megatree_GBOTB.tre").read_text()
     tips = {t.strip().strip("'").replace("_", " ")
             for t in re.findall(r"[(,]([^(),:;]+)", text)}
-    con.execute("CREATE OR REPLACE TABLE megatree_tips (name VARCHAR)")
+    run(con, "CREATE OR REPLACE TABLE megatree_tips (name VARCHAR)")
     con.executemany("INSERT INTO megatree_tips VALUES (?)", [(t,) for t in tips])
 
 
@@ -268,7 +301,7 @@ def main():
     extract_gbif_plantae()
 
     con = duckdb.connect(str(DB))
-    load(con, "wfo_raw", f"SELECT * FROM {read_tsv_or_csv(DATA / 'classification.csv')}")
+    load(con, "wfo_raw", load_wfo)
     load(con, "wcvp_names", f"SELECT * FROM read_csv('{DATA / 'wcvp_names.csv'}', all_varchar=true)")
     load(con, "wcvp_distributions",
          f"SELECT * FROM read_csv('{DATA / 'wcvp_distributions.csv'}', all_varchar=true)")
@@ -285,8 +318,8 @@ def main():
     load(con, "megatree_tips", load_megatree)
 
     log("building plant_index")
-    con.execute(INDEX_SQL)
-    con.execute(f"COPY plant_index TO '{DATA / 'plant_index.parquet'}' (FORMAT parquet)")
+    run(con, INDEX_SQL)
+    run(con, f"COPY plant_index TO '{DATA / 'plant_index.parquet'}' (FORMAT parquet)")
     log(con.execute("""
         SELECT count(*) names, count(wikidata_qid) wikidata, count(gbif_id) gbif,
                count(ncbi_taxid) ncbi, count(wcvp_id) wcvp, sum(in_megatree::INT) megatree
