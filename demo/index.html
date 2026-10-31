@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Which books mention this plant?</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; } select { font-size: 1rem; padding: .4rem; max-width: 100%; }
+  .sub { color: #555; font-size: .9rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; font-size: .9rem; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #ddd; vertical-align: top; }
+  th { background: #f4f4f4; } td.num { text-align: right; white-space: nowrap; }
+  h2 { font-size: 1.05rem; margin-top: 1.5rem; } h2 i { font-weight: normal; }
+  a { color: #0b5cad; } #status { color: #777; }
+</style>
+</head>
+<body>
+<h1>Which books mention this plant?</h1>
+<p class="sub">Demo over the BHL book-mention index. Pick a plant - the ten most
+cited and the ten least cited (at least one mention) by book count.</p>
+<p>
+  <select id="plant">
+    <option value="">choose a plant…</option>
+    <optgroup label="Most cited">
+      <option>Tricalysia</option><option>Prunus</option><option>Salvia</option>
+      <option>Asparagus</option><option>Phlox</option><option>Centaurea</option>
+      <option>Syringa</option><option>Clematis</option><option>Pinus</option>
+      <option>Hibiscus</option>
+    </optgroup>
+    <optgroup label="Least cited (1 book)">
+      <option>Ligularia odontomanes</option><option>Psiadia anchusifolia</option>
+      <option>Hieracium wyomingense</option><option>Inula rhizantha</option>
+      <option>Matricaria karjaginii</option><option>Senecio infestus</option>
+      <option>Placus humifusa</option><option>Carduus cinerascens</option>
+      <option>Euryops ursinoides</option><option>Hieracium valdelitigiosum</option>
+    </optgroup>
+  </select>
+  <span id="status"></span>
+</p>
+<div id="result"></div>
+<script>
+const LIMIT = 50;
+document.getElementById('plant').addEventListener('change', async e => {
+  const name = e.target.value, out = document.getElementById('result'),
+        status = document.getElementById('status');
+  out.innerHTML = ''; if (!name) return;
+  status.textContent = 'loading…';
+  const r = await fetch(`/books?name=${encodeURIComponent(name)}&limit=${LIMIT}`);
+  if (!r.ok) { status.textContent = 'no data'; out.textContent = (await r.json()).detail; return; }
+  const data = await r.json();
+  status.textContent = '';
+  for (const p of data.plants) {
+    const h = document.createElement('h2');
+    h.innerHTML = `<i>${p.name}</i> ${p.author || ''} — ${p.books} book${p.books === 1 ? '' : 's'}, ` +
+                  `${p.page_mentions.toLocaleString()} page mentions` +
+                  (p.books_dutch ? `, ${p.books_dutch} Dutch` : '');
+    out.appendChild(h);
+    const t = document.createElement('table');
+    t.innerHTML = '<tr><th>Book</th><th>Author of book</th><th>Pages</th>' +
+                  '<th>Years cited</th><th>Copy</th></tr>' +
+        p.citations.map(c => `<tr>
+          <td><a href="${c.item_url || c.title_url}" target="_blank">${c.title}</a></td>
+          <td>${c.book_author || ''}</td>
+          <td class="num">${c.pages}</td>
+          <td>${c.first_year ?? ''}${c.last_year && c.first_year != c.last_year ? '–' + c.last_year : ''}</td>
+          <td>${[c.institution, c.volume].filter(Boolean).join(' · ')}</td></tr>`).join('');
+    out.appendChild(t);
+    if (p.books > p.citations.length) {
+      const more = document.createElement('p'); more.className = 'sub';
+      more.textContent = `Showing the ${p.citations.length} most-mentioned of ${p.books} books.`;
+      out.appendChild(more);
+    }
+  }
+});
+</script>
+</body>
+</html>
