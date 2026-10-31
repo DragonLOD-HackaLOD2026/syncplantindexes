@@ -16,6 +16,7 @@ Four verdicts:
 Exit code is 1 if anything FAILed.
 """
 import csv
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -110,6 +111,11 @@ TABLES = [
     ("obs_areas", "municipality centroids + bounding boxes (#8)", "wanted"),
     ("nl_totals", "one row per plant: how much of the NL it is found in (#7)", "wanted"),
     ("observations_nl_full", "observations_nl + area centroids, for maps (#8)", "wanted"),
+    ("entity_map", "observation key -> plant entity key (#15)", "wanted"),
+    ("export_entities", "every exported plant entity, one row (#15)", "wanted"),
+    ("mention_edges", "plant x BHL title rolled up, pages summed (#15)", "wanted"),
+    ("book_nodes", "one row per mentioned BHL title (#15)", "wanted"),
+    ("plant_area_scores", "plant x 355 gemeenten, prevalence pre-computed (#15)", "wanted"),
     ("wikidata_ids", "parked (issue #2)", "parked"),
     ("wikidata_common_names", "parked (issue #2)", "parked"),
 ]
@@ -601,6 +607,56 @@ def check_matching(con):
     return rows
 
 
+def check_rdf(con):
+    """N-Triples exports (#11 slice, #15 full): presence, size, freshness."""
+    rows = []
+    rdf = DATA / "rdf"
+    nt = rdf / "slice.nt"
+    if nt.exists():
+        rows.append(("ok", "rdf slice", nt.stat().st_size,
+                     "plant_data/rdf/slice.nt - checked by validate_rdf.py "
+                     "and prototype/run_queries.py"))
+    else:
+        rows.append(("warn", "rdf slice", None,
+                     "missing -> python build_rdf.py --slice 200"))
+    files = ["plants.nt", "areas.nt", "observations.nt", "books.nt"]
+    manifest = rdf / "manifest.json"
+    if not all((rdf / f).exists() for f in files):
+        rows.append(("warn", "rdf full export", None,
+                     "not built yet -> python build_rdf.py --full"))
+        return rows
+    total = sum((rdf / f).stat().st_size for f in files)
+    rows.append(("ok", "rdf full export", total,
+                 " + ".join(f"{f} {(rdf / f).stat().st_size // 2**20} MB"
+                            for f in files)))
+    if not manifest.exists():
+        rows.append(("warn", "rdf manifest", None,
+                     "files exist but plant_data/rdf/manifest.json is missing"))
+        return rows
+    man = json.load(open(manifest))
+    c = man["counts"]
+    live = {
+        "plants": one(con, "SELECT count(*) FROM export_entities", default=-1),
+        "mentions": one(con, "SELECT count(*) FROM mention_edges", default=-1),
+        "observations": one(con, "SELECT count(*) FROM plant_area_scores",
+                            default=-1),
+        "books": one(con, "SELECT count(*) FROM book_nodes", default=-1),
+    }
+    stale = [f"{k}: export {human(c[k])} vs table {human(live[k])}"
+             for k in live if live[k] >= 0 and live[k] != c[k]]
+    if stale:
+        rows.append(("warn", "rdf counts vs tables", None,
+                     "export predates the data, rebuild --full: "
+                     + "; ".join(stale)))
+    else:
+        rows.append(("ok", "rdf counts vs tables", c["triples"],
+                     f"manifest {man['export_date']}: plants {human(c['plants'])}"
+                     f", books {human(c['books'])}, mentions "
+                     f"{human(c['mentions'])}, observations "
+                     f"{human(c['observations'])} - all match the tables"))
+    return rows
+
+
 def check_parked(con):
     wd = one(con, "SELECT count(wikidata_qid) FROM plant_index", default=0) if \
         has_col(con, "plant_index", "wikidata_qid") else 0
@@ -620,6 +676,7 @@ SECTIONS = [
     ("Origin and Netherlands status (#5)", check_status),
     ("Observations in the Netherlands (#7 #8)", check_obs),
     ("Matching notes", check_matching),
+    ("RDF exports (#11 #15)", check_rdf),
     ("Parked - decided against, not bugs", check_parked),
 ]
 

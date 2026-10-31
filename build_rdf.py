@@ -4,8 +4,9 @@
 Reads plant_data/plant_index.duckdb, writes N-Triples under plant_data/rdf/.
 
 `--slice 200` restricts the export to the 200 most-observed Dutch plants (plus
-hand-picked edge cases), their gemeenten facts and their books. Without --slice
-the same code exports everything (issue #15).
+hand-picked edge cases), their gemeenten facts and their books, in one file.
+`--full` exports everything as four files (plants/areas/observations/books,
+issue #15), materializing derived tables first so the export only streams.
 
 Locked unit-of-analysis decisions (2026-10-31, measured against the live DB):
   1. A plant entity is a WFO record that is NOT a synonym, or an observation
@@ -28,8 +29,12 @@ No Wikidata anything (parked, issue #2).
 """
 
 import argparse
+import glob
+import json
 import os
+import shutil
 import sys
+import time
 from datetime import date, timezone, datetime
 from urllib.parse import quote
 
@@ -316,23 +321,7 @@ def export(con, fh, slice_keys=None):
         "SELECT id, name, province, hasc, lat, lng, xmin, xmax, ymin, ymax,"
         " n_names, occurrences FROM obs_areas WHERE in_nl ORDER BY id"
     ).fetchall()
-    for (aid, aname, prov, hasc, lat, lng, xmin, xmax, ymin, ymax,
-         n_names, occ) in areas:
-        a = I(area_uri(aid))
-        ex.tri(a, I(RDF_TYPE), I(SCHEMA + "Place"))
-        ex.fact(a, SCHEMA + "name", aname, lang="nl")
-        ex.fact(a, SCHEMA + "administrativeArea", prov, lang="nl")
-        ex.fact(a, PRED + "hasCode", hasc)
-        ex.tri(a, I(SCHEMA + "geo"), f"_:geo{aid}")
-        ex.tri(f"_:geo{aid}", I(RDF_TYPE), I(SCHEMA + "GeoCoordinates"))
-        ex.tri(f"_:geo{aid}", I(SCHEMA + "latitude"), L(float(lat)))
-        ex.tri(f"_:geo{aid}", I(SCHEMA + "longitude"), L(float(lng)))
-        ex.fact(a, PRED + "bboxNorth", ymax)
-        ex.fact(a, PRED + "bboxSouth", ymin)
-        ex.fact(a, PRED + "bboxEast", xmax)
-        ex.fact(a, PRED + "bboxWest", xmin)
-        ex.tri(a, I(PRED + "areaTotalOccurrences"), L(int(occ)))
-        ex.tri(a, I(PRED + "plantSpeciesCount"), L(int(n_names)))
+    emit_areas(ex, areas)
     counts["areas"] = len(areas)
     area_totals = {r[0]: r[1] for r in
                    con.execute("SELECT id, occurrences FROM obs_areas WHERE in_nl").fetchall()}
@@ -620,6 +609,37 @@ def export(con, fh, slice_keys=None):
     counts["observations"] = n_obs
 
     # ---- vocabulary: every plantdb: predicate and status term explains itself
+    emit_vocab(ex)
+
+    # ---- self-check: every plantdb: predicate used must have a definition
+    check_definitions([ex])
+
+    return counts, ex.n
+
+
+def emit_areas(ex, areas):
+    """schema:Place nodes - identical in slice and full mode."""
+    for (aid, aname, prov, hasc, lat, lng, xmin, xmax, ymin, ymax,
+         n_names, occ) in areas:
+        a = I(area_uri(aid))
+        ex.tri(a, I(RDF_TYPE), I(SCHEMA + "Place"))
+        ex.fact(a, SCHEMA + "name", aname, lang="nl")
+        ex.fact(a, SCHEMA + "administrativeArea", prov, lang="nl")
+        ex.fact(a, PRED + "hasCode", hasc)
+        ex.tri(a, I(SCHEMA + "geo"), f"_:geo{aid}")
+        ex.tri(f"_:geo{aid}", I(RDF_TYPE), I(SCHEMA + "GeoCoordinates"))
+        ex.tri(f"_:geo{aid}", I(SCHEMA + "latitude"), L(float(lat)))
+        ex.tri(f"_:geo{aid}", I(SCHEMA + "longitude"), L(float(lng)))
+        ex.fact(a, PRED + "bboxNorth", ymax)
+        ex.fact(a, PRED + "bboxSouth", ymin)
+        ex.fact(a, PRED + "bboxEast", xmax)
+        ex.fact(a, PRED + "bboxWest", xmin)
+        ex.tri(a, I(PRED + "areaTotalOccurrences"), L(int(occ)))
+        ex.tri(a, I(PRED + "plantSpeciesCount"), L(int(n_names)))
+
+
+def emit_vocab(ex):
+    """every plantdb: predicate and status term explains itself"""
     for pred, (label, definition, label_nl) in DEFINITIONS.items():
         u = I(PRED + pred)
         ex.tri(u, I(RDFS + "label"), L(label, lang="en"))
@@ -635,22 +655,367 @@ def export(con, fh, slice_keys=None):
         ex.tri(u, I(SKOS + "definition"), L(definition, lang="en"))
         ex.tri(vocab_set, I(SCHEMA + "hasPart"), u)
 
-    # ---- self-check: every plantdb: predicate used must have a definition
-    used = {u[len(PRED):] for u in
-            [p for p in ex.used_predicates if p.startswith(I(PRED))]}
+
+def check_definitions(exs):
+    """every plantdb: predicate used in any file must carry a definition"""
+    used = set()
+    for ex in exs:
+        used |= {u[len(PRED):] for u in
+                 [p for p in ex.used_predicates if p.startswith(I(PRED))]}
     missing = used - set(DEFINITIONS)
     if missing:
         print(f"FATAL: plantdb: predicates used but not defined: {missing}",
               file=sys.stderr)
         sys.exit(1)
 
-    return counts, ex.n
+
+# ------------------------------------------------------------------ full mode
+# Full export (issue #15): every non-synonym WFO record + unresolved NL name
+# keys as plants, ALL rolled-up BHL mentions, the full zero-filled NL
+# observation grid. Four plain .nt files, no sharding. To keep this streaming
+# (640k entities, 19M mention edges, 4.3M observation facts), the joins are
+# materialized once into derived tables; the exporter just SELECTs from them.
+
+FULL_FILES = ["plants.nt", "areas.nt", "observations.nt", "books.nt"]
+
+
+def build_derived(con):
+    """One-off materialization so the exporter never builds a 640k-element
+    IN() list or a 19M-row Python list."""
+    t0 = time.time()
+    con.execute("""
+        CREATE OR REPLACE TABLE entity_map AS
+        SELECT k.key AS okey, coalesce(min(p.wfo_id), k.key) AS ekey
+        FROM nl_totals k
+        LEFT JOIN plant_index p
+               ON (p.wfo_id = k.key
+                   OR (k.key NOT LIKE 'wfo-%'
+                       AND lower(p.name) = lower(k.key)
+                       AND p.status <> 'Synonym'))
+        GROUP BY k.key""")
+    con.execute("""
+        CREATE OR REPLACE TABLE export_entities AS
+        SELECT p.wfo_id AS ekey, p.name, p.author, p.rank, p.status, p.family,
+               p.ipni_id, p.wcvp_id, p.powo_id, p.gbif_id, p.ncbi_taxid,
+               p.gbif_src, p.ncbi_src, NULL AS link_src, NULL AS gbif_name
+        FROM plant_index p WHERE p.status <> 'Synonym'
+        UNION ALL
+        SELECT m.ekey, k.name, k.author, k.rank, 'Unlinked', k.family,
+               NULL, NULL, NULL, NULL, NULL, NULL, NULL, k.link_src, k.gbif_name
+        FROM entity_map m JOIN nl_totals k ON k.key = m.okey
+        WHERE m.ekey NOT LIKE 'wfo-%'""")
+    # mention edges: synonyms re-keyed to accepted, merged per (plant,title),
+    # pages summed; restricted to real entities (no dangling mention subjects).
+    # From the plant_books BASE TABLE, not the plant_books_full view: that
+    # view LEFT JOINs bhl_items, whose 9,214 duplicate ItemIDs fan out ~1.6M
+    # rows and would double-count pages. Citations come from bhl_titles below.
+    con.execute("""
+        CREATE OR REPLACE TABLE mention_edges AS
+        WITH keyed AS (
+            SELECT coalesce(nullif(p.accepted_wfo_id, ''), b.wfo_id) AS ekey,
+                   b.title_id,
+                   sum(b.pages) AS pages,
+                   bool_or(b.dutch_language) AS d_lang,
+                   bool_or(b.dutch_published) AS d_pub,
+                   bool_or(b.dutch <> '') AS d_any,
+                   max(b.published_place) AS place,
+                   min(b.first_year) AS first_year,
+                   max(b.last_year) AS last_year
+            FROM plant_books b
+            JOIN plant_index p USING (wfo_id)
+            GROUP BY 1, 2)
+        SELECT k.* FROM keyed k
+        WHERE k.ekey IN (SELECT ekey FROM export_entities)""")
+    # one book node per mentioned title; Dutch flags per TITLE (any mention)
+    con.execute("""
+        CREATE OR REPLACE TABLE book_nodes AS
+        WITH agg AS (
+            SELECT title_id,
+                   bool_or(d_lang) AS d_lang, bool_or(d_pub) AS d_pub,
+                   bool_or(d_any) AS d_any, max(place) AS place
+            FROM mention_edges GROUP BY title_id)
+        SELECT a.*,
+               t."FullTitle" AS full_title, t."TL2Author" AS author_of_book,
+               t."LanguageCode" AS lang_code, t."StartYear" AS start_y,
+               t."EndYear" AS end_y, t."TitleURL" AS title_url
+        FROM agg a
+        LEFT JOIN bhl_titles t ON t."TitleID" = a.title_id""")
+    # the exact rows Query B reads: plant x every Dutch gemeente, zeros in,
+    # prevalence rounded to the 6 decimals the contract validates
+    con.execute("""
+        CREATE OR REPLACE TABLE plant_area_scores AS
+        WITH obs_ent AS (
+            SELECT em.ekey, o.area_id, o.occurrences, o.first_year, o.last_year
+            FROM observations_nl o
+            JOIN entity_map em ON em.okey = o.key
+            WHERE o.in_nl
+        )
+        SELECT m.ekey, a.id AS area_id,
+               coalesce(o.occurrences, 0) AS occurrences,
+               a.occurrences AS area_total,
+               round(coalesce(o.occurrences, 0)::DOUBLE / a.occurrences, 6)
+                   AS score,
+               o.first_year, o.last_year
+        FROM (SELECT DISTINCT ekey FROM entity_map) m
+        CROSS JOIN (SELECT id, occurrences FROM obs_areas WHERE in_nl) a
+        LEFT JOIN obs_ent o ON o.ekey = m.ekey AND o.area_id = a.id""")
+    q = lambda name: con.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
+    print(f"derived tables in {time.time()-t0:.0f}s: "
+          f"entity_map {q('entity_map'):,} | export_entities "
+          f"{q('export_entities'):,} | mention_edges {q('mention_edges'):,} "
+          f"| book_nodes {q('book_nodes'):,} | plant_area_scores "
+          f"{q('plant_area_scores'):,}")
+
+
+def stream(cur, sql, params=None, chunk=1_000_000):
+    """iterate a DuckDB result in chunks - never materialize millions of rows"""
+    cur.execute(sql, params) if params else cur.execute(sql)
+    while True:
+        rows = cur.fetchmany(chunk)
+        if not rows:
+            return
+        yield from rows
+
+
+def export_full(con, out_dir):
+    counts = {}
+    t0 = time.time()
+
+    # ---- areas.nt
+    with open_writer(out_dir, "areas.nt") as (ex, path):
+        emit_areas(ex, list(stream(con,
+            "SELECT id, name, province, hasc, lat, lng, xmin, xmax, ymin,"
+            " ymax, n_names, occurrences FROM obs_areas WHERE in_nl"
+            " ORDER BY id")))
+        counts["areas"] = con.execute(
+            "SELECT count(*) FROM obs_areas WHERE in_nl").fetchone()[0]
+        areas_ex, areas_n = ex, ex.n
+
+    # ---- plants.nt (entities, synonyms, origin, status, totals, BHL counts,
+    # vocabulary - the shared def/vocab triples live here)
+    with open_writer(out_dir, "plants.nt") as (ex, path):
+        emit_vocab(ex)
+        for (ekey, name, author, rank, status, family, ipni, wcvp_id, powo,
+             gbif_id, ncbi, gbif_src, ncbi_src, link_src, gbif_name) in stream(
+                con, "SELECT * FROM export_entities ORDER BY ekey"):
+            p = I(plant_uri(ekey))
+            ex.tri(p, I(RDF_TYPE), I(SCHEMA + "BioChemEntity"))
+            ex.tri(p, I(RDF_TYPE), I(DWC + "Taxon"))
+            display = (name or gbif_name) if ekey.startswith("wfo-") \
+                else (gbif_name or name)
+            display = display_case(display) if display else display
+            ex.fact(p, DWC + "scientificName", display)
+            if display:
+                ex.fact(p, PRED + "normalizedName", display.lower())
+            ex.fact(p, DWC + "scientificNameAuthorship", author)
+            ex.fact(p, DWC + "taxonRank", rank)
+            if status != "Unlinked":
+                ex.fact(p, DWC + "taxonomicStatus", status)
+            ex.fact(p, DWC + "family", family)
+            if ekey.startswith("wfo-"):
+                ex.tri(p, I(OWL + "sameAs"), I(WFO + ekey))
+                ex.fact(p, SCHEMA + "identifier", ekey)
+            for idval, uri in ((gbif_id, GBIF), (ncbi, NCBI),
+                               (ipni, IPNI), (powo, POWO)):
+                if idval:
+                    ex.fact(p, SCHEMA + "identifier", idval)
+                    ex.tri(p, I(OWL + "sameAs"), I(uri + idval))
+            ex.fact(p, PRED + "gbifLinkSource", gbif_src)
+            ex.fact(p, PRED + "ncbiLinkSource", ncbi_src)
+            ex.fact(p, PRED + "linkSource", link_src)
+        counts["plants"] = con.execute(
+            "SELECT count(*) FROM export_entities").fetchone()[0]
+
+        n_syn = 0
+        for _ekey, sname, sauthor in stream(con, """
+                SELECT s.accepted_wfo_id, s.name, s.author
+                FROM plant_index s
+                WHERE s.status = 'Synonym'
+                  AND s.accepted_wfo_id IN (SELECT ekey FROM export_entities)
+                ORDER BY s.accepted_wfo_id"""):
+            label = f"{sname} {sauthor}".strip() if sauthor else sname
+            ex.fact(I(plant_uri(_ekey)), SKOS + "altLabel", label)
+            n_syn += 1
+        counts["synonym_labels"] = n_syn
+
+        # name-only plants: GBIF dataset code as a plain fact (never sameAs)
+        for ekey, gkey in stream(con, """
+                SELECT m.ekey,
+                       (SELECT gbif_key FROM observations_nl
+                        WHERE key = m.okey AND gbif_key IS NOT NULL LIMIT 1)
+                FROM entity_map m WHERE m.ekey NOT LIKE 'wfo-%'"""):
+            if gkey:
+                ex.fact(I(plant_uri(ekey)), PRED + "gbifDatasetKey", gkey)
+
+        for wfo, n_nat, regions, groups, n_intro, n_tot in stream(con, """
+                SELECT wfo_id, n_native_regions, native_regions, native_groups,
+                       n_introduced_regions, n_regions_total
+                FROM taxon_ranges
+                WHERE wfo_id IN (SELECT ekey FROM export_entities)
+                ORDER BY wfo_id"""):
+            p = I(plant_uri(wfo))
+            ex.tri(p, I(PRED + "nativeRegionCount"), L(int(n_nat)))
+            if regions:
+                for r in regions.split(", "):
+                    ex.fact(p, PRED + "nativeRegion", r, lang="en")
+            if groups:
+                for g in groups.split(", "):
+                    ex.fact(p, PRED + "nativeGroup", g, lang="en")
+            ex.tri(p, I(PRED + "introducedRegionCount"), L(int(n_intro)))
+            ex.tri(p, I(PRED + "regionTotalCount"), L(int(n_tot)))
+
+        for (wfo, status, conflict, inv, ext, ayear, nsrc,
+             wcvp_s, glonaf_s, sinas_s, griis_s) in stream(con, """
+                SELECT wfo_id, status, conflict, invasive, extinct,
+                       arrival_year, n_sources, wcvp_status, glonaf_status,
+                       sinas_status, griis_status
+                FROM nl_status
+                WHERE wfo_id IN (SELECT ekey FROM export_entities)
+                ORDER BY wfo_id"""):
+            p = I(plant_uri(wfo))
+            ex.tri(p, I(PRED + "nlStatus"), I(status_uri(status)))
+            ex.tri(p, I(PRED + "statusConflict"), L(bool(conflict)))
+            ex.tri(p, I(PRED + "invasive"), L(bool(inv)))
+            ex.tri(p, I(PRED + "extinct"), L(bool(ext)))
+            ex.fact(p, PRED + "arrivalYear", ayear)
+            ex.tri(p, I(PRED + "statusSourceCount"), L(int(nsrc)))
+            ex.fact(p, PRED + "statusWcvp", wcvp_s)
+            ex.fact(p, PRED + "statusGlonaf", glonaf_s)
+            ex.fact(p, PRED + "statusSinas", sinas_s)
+            ex.fact(p, PRED + "statusGriis", griis_s)
+
+        for (ekey, n_areas, occ_nl, occ_out, occ_none, fy, ly) in stream(con, """
+                SELECT m.ekey, coalesce(k.n_areas_nl, 0),
+                       coalesce(k.occurrences_nl, 0),
+                       coalesce(k.occurrences_outside_nl, 0),
+                       coalesce(k.occurrences_no_area, 0),
+                       k.first_year, k.last_year
+                FROM nl_totals k JOIN entity_map m ON m.okey = k.key
+                ORDER BY m.ekey"""):
+            p = I(plant_uri(ekey))
+            ex.tri(p, I(PRED + "nlAreaCount"), L(int(n_areas)))
+            ex.tri(p, I(PRED + "nlOccurrenceCount"), L(int(occ_nl)))
+            ex.tri(p, I(PRED + "occurrencesOutsideNl"), L(int(occ_out)))
+            ex.tri(p, I(PRED + "occurrencesUnplaced"), L(int(occ_none)))
+            ex.fact(p, PRED + "firstObservationYear", fy)
+            ex.fact(p, PRED + "lastObservationYear", ly)
+
+        # BHL counts from the same edges books.nt emits: Query A's numbers
+        # always match Query C's answer
+        for ekey, titles, pages, fy, ly in stream(con, """
+                SELECT ekey, count(*), sum(pages), min(first_year),
+                       max(last_year)
+                FROM mention_edges GROUP BY ekey ORDER BY ekey"""):
+            p = I(plant_uri(ekey))
+            ex.tri(p, I(PRED + "bhlTitleCount"), L(int(titles)))
+            ex.tri(p, I(PRED + "bhlPageMentions"), L(int(pages)))
+            ex.fact(p, PRED + "bhlFirstYear", fy)
+            ex.fact(p, PRED + "bhlLastYear", ly)
+        for ekey, d_any, d_lang, d_pub in stream(con, """
+                SELECT ekey, count(*) FILTER (d_any), count(*) FILTER (d_lang),
+                       count(*) FILTER (d_pub)
+                FROM mention_edges GROUP BY ekey ORDER BY ekey"""):
+            p = I(plant_uri(ekey))
+            ex.tri(p, I(PRED + "dutchTitleCount"), L(int(d_any)))
+            ex.tri(p, I(PRED + "dutchLanguageTitleCount"), L(int(d_lang)))
+            ex.tri(p, I(PRED + "dutchPublishedTitleCount"), L(int(d_pub)))
+        plants_ex, plants_n = ex, ex.n
+
+    # ---- observations.nt: the pre-computed grid, exactly Query B's rows
+    with open_writer(out_dir, "observations.nt") as (ex, path):
+        for (ekey, aid, occ, total, score, fy, ly) in stream(con, """
+                SELECT ekey, area_id, occurrences, area_total, score,
+                       first_year, last_year
+                FROM plant_area_scores ORDER BY ekey, area_id"""):
+            o = I(obs_uri(ekey, aid))
+            ex.tri(o, I(RDF_TYPE), I(QB + "Observation"))
+            ex.tri(o, I(PRED + "aboutPlant"), I(plant_uri(ekey)))
+            ex.tri(o, I(PRED + "observedIn"), I(area_uri(aid)))
+            ex.tri(o, I(PRED + "occurrences"), L(int(occ)))
+            ex.tri(o, I(PRED + "areaTotalOccurrences"), L(int(total)))
+            ex.tri(o, I(PRED + "prevalenceScore"), L(float(score)))
+            ex.fact(o, PRED + "firstRecordYear", fy)
+            ex.fact(o, PRED + "lastRecordYear", ly)
+        counts["observations"] = con.execute(
+            "SELECT count(*) FROM plant_area_scores").fetchone()[0]
+        obs_ex, obs_n = ex, ex.n
+
+    # ---- books.nt: one node per title + reified mention edges
+    with open_writer(out_dir, "books.nt") as (ex, path):
+        ISO = {"ENG": "en", "GER": "de", "FRE": "fr", "LAT": "la",
+               "SPA": "es", "ITA": "it", "DUT": "nl", "DUTCH": "nl",
+               "RUS": "ru", "SCR": "sr", "POL": "pl", "SWE": "sv",
+               "DAN": "da", "POR": "pt", "FIN": "fi", "GRE": "el",
+               "HUN": "hu", "CZE": "cs", "UKR": "uk"}
+        for (tid, d_lang, d_pub, d_any, place, full_title, author_of_book,
+             lang_code, start_y, end_y, title_url) in stream(con, """
+                SELECT * FROM book_nodes ORDER BY title_id"""):
+            b = I(BHL + tid)
+            ex.tri(b, I(RDF_TYPE), I(SCHEMA + "CreativeWork"))
+            # NDE SCHEMA-AP: exactly one sdDatePublished per CreativeWork
+            ex.tri(b, I(SCHEMA + "sdDatePublished"),
+                   f'"{EXPORT_DATE}"^^<{XSD}date>')
+            if full_title:
+                ex.fact(b, SCHEMA + "name", full_title, lang="mul")
+            ex.fact(b, PRED + "authorOfBook", author_of_book)
+            sy = int(start_y) if (start_y or "").isdigit() else None
+            ey = int(end_y) if (end_y or "").isdigit() else None
+            ex.fact(b, PRED + "coverageStartYear", sy)
+            ex.fact(b, PRED + "coverageEndYear", ey)
+            ex.fact(b, PRED + "publishedPlace", place)
+            ex.fact(b, PRED + "languageCode", lang_code)
+            iso = ISO.get(lang_code)
+            if iso:
+                ex.fact(b, SCHEMA + "inLanguage", iso)
+            ex.tri(b, I(PRED + "dutchLanguage"), L(bool(d_lang)))
+            ex.tri(b, I(PRED + "dutchPublished"), L(bool(d_pub)))
+            ex.tri(b, I(PRED + "dutchRelevance"), L(bool(d_any)))
+            if title_url:
+                ex.tri(b, I(SCHEMA + "url"), I(title_url))
+                ex.tri(b, I(OWL + "sameAs"), I(title_url))
+        counts["books"] = con.execute(
+            "SELECT count(*) FROM book_nodes").fetchone()[0]
+
+        for ekey, tid, pages in stream(con, """
+                SELECT ekey, title_id, pages FROM mention_edges
+                ORDER BY ekey, title_id"""):
+            mu = I(mention_uri(ekey, tid))
+            ex.tri(mu, I(RDF_TYPE), I(PRED + "TaxonMention"))
+            ex.tri(mu, I(PRED + "aboutPlant"), I(plant_uri(ekey)))
+            ex.tri(mu, I(PRED + "mentionsBook"), I(BHL + tid))
+            ex.tri(mu, I(PRED + "pages"), L(int(pages)))
+        counts["mentions"] = con.execute(
+            "SELECT count(*) FROM mention_edges").fetchone()[0]
+        books_ex, books_n = ex, ex.n
+
+    check_definitions([areas_ex, plants_ex, obs_ex, books_ex])
+    counts["triples"] = areas_n + plants_n + obs_n + books_n
+    counts["seconds"] = round(time.time() - t0)
+    return counts
+
+
+def open_writer(out_dir, name):
+    """context manager: open FILE.part, yield (Exporter, final path)"""
+    import contextlib
+
+    @contextlib.contextmanager
+    def ctx():
+        path = os.path.join(out_dir, name)
+        ex = Exporter(open(path + ".part", "w", encoding="utf-8",
+                           buffering=1 << 20))
+        try:
+            yield ex, path
+        finally:
+            ex.fh.close()
+    return ctx()
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--slice", type=int, metavar="N", default=None,
                     help="export only the N most-observed plants + edge cases")
+    ap.add_argument("--full", action="store_true",
+                    help="full export: four .nt files in plant_data/rdf")
     ap.add_argument("--force", action="store_true",
                     help="regenerate even if the output already exists")
     ap.add_argument("--out", default=os.path.join(OUT_DIR, "slice.nt"),
@@ -659,6 +1024,38 @@ def main():
 
     if not os.path.exists(DB):
         sys.exit(f"no database at {DB}")
+
+    if args.full:
+        os.makedirs(OUT_DIR, exist_ok=True)
+        outs = [os.path.join(OUT_DIR, f) for f in FULL_FILES]
+        if all(os.path.exists(f) for f in outs) and not args.force:
+            print("all four files exist (use --force to regenerate):")
+            for f in outs:
+                print(f"  {f}  {os.path.getsize(f):,} bytes")
+            return
+        con = duckdb.connect(DB)  # write mode: derived tables land here
+        build_derived(con)
+        counts = export_full(con, OUT_DIR)
+        for f, path in zip(FULL_FILES, outs):
+            os.replace(path + ".part", path)
+        manifest = os.path.join(OUT_DIR, "manifest.json")
+        with open(manifest, "w") as fh:
+            json.dump({"export_date": EXPORT_DATE, "counts": counts,
+                       "files": {f: os.path.getsize(os.path.join(OUT_DIR, f))
+                                 for f in FULL_FILES}}, fh, indent=2)
+        # the hand-over folder must be self-contained: guide + query files
+        if os.path.exists("HANDOVER.md"):
+            shutil.copy("HANDOVER.md", os.path.join(OUT_DIR, "HANDOVER.md"))
+            os.makedirs(os.path.join(OUT_DIR, "queries"), exist_ok=True)
+            for rq in glob.glob("prototype/queries/*.rq"):
+                shutil.copy(rq, os.path.join(OUT_DIR, "queries"))
+        print(f"wrote {len(FULL_FILES)} files + manifest.json in "
+              f"{counts['seconds']}s; {counts['triples']:,} triples")
+        for k, v in counts.items():
+            if k not in ("seconds",):
+                print(f"  {k:20} {v:,}")
+        return
+
     if os.path.exists(args.out) and not args.force:
         print(f"{args.out} exists (use --force to regenerate)")
         return

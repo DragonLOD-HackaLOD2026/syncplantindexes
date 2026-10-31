@@ -16,12 +16,19 @@ Checks, fastest first:
      contract shapes (shacl/plantdb-shapes.ttl).
 
 python validate_rdf.py                 # validates plant_data/rdf/slice.nt
-python validate_rdf.py --graph FILE    # validate another .nt (sample later)
+python validate_rdf.py --graph FILE    # validate another single .nt file
+python validate_rdf.py --full          # the four full-export files: batched
+                                       # contract queries over the WHOLE graph
+                                       # (disk-backed Oxigraph store), plus
+                                       # pySHACL over the slice (rdflib cannot
+                                       # hold 100M+ triples - issue #12 decision)
 python validate_rdf.py --self-test     # the broken example MUST fail: proves
                                        # the harness actually catches problems
 """
 
 import argparse
+import json
+import os
 import sys
 import time
 
@@ -90,6 +97,102 @@ SELF_DESCRIBE_QUERIES = {
 }
 
 
+# the same shapes the SHACL run checks, expressed as batched SPARQL so they
+# can run over the WHOLE full export (--full); one query per rule, each
+# returns offending subjects (LIMIT-ed).
+FULL_CONTRACT_QUERIES = {
+    "book: exactly one schema:name": f"""
+        PREFIX schema: <{SCHEMA}>
+        SELECT ?b WHERE {{ ?b a <{SCHEMA}CreativeWork> .
+            {{ SELECT ?b (COUNT(?n) AS ?c) WHERE {{ ?b schema:name ?n }}
+              GROUP BY ?b }} FILTER (?c <> 1) }} LIMIT 6""",
+    "book: exactly one schema:sdDatePublished": f"""
+        PREFIX schema: <{SCHEMA}>
+        SELECT ?b WHERE {{ ?b a <{SCHEMA}CreativeWork> .
+            {{ SELECT ?b (COUNT(?d) AS ?c) WHERE {{ ?b schema:sdDatePublished ?d }}
+              GROUP BY ?b }} FILTER (?c <> 1) }} LIMIT 6""",
+    "book: dutchRelevance flag present": f"""
+        PREFIX schema: <{SCHEMA}>
+        SELECT ?b WHERE {{ ?b a <{SCHEMA}CreativeWork> .
+            FILTER NOT EXISTS {{ ?b <{PLANTDB}dutchRelevance> ?x }} }} LIMIT 6""",
+    "plant: exactly one dwc:scientificName": """
+        PREFIX dwc: <http://rs.tdwg.org/dwc/terms/>
+        SELECT ?p WHERE { ?p a <http://rs.tdwg.org/dwc/terms/Taxon> .
+            { SELECT ?p (COUNT(?n) AS ?c) WHERE { ?p dwc:scientificName ?n }
+              GROUP BY ?p } FILTER (?c <> 1) } LIMIT 6""",
+    "plant: normalizedName present": f"""
+        PREFIX dwc: <http://rs.tdwg.org/dwc/terms/>
+        SELECT ?p WHERE {{ ?p a <http://rs.tdwg.org/dwc/terms/Taxon> .
+            FILTER NOT EXISTS {{ ?p <{PLANTDB}normalizedName> ?n }} }} LIMIT 6""",
+    "mention: type+aboutPlant+mentionsBook+pages all present": f"""
+        SELECT ?m WHERE {{ ?m a <{PLANTDB}TaxonMention> .
+            FILTER (NOT EXISTS {{ ?m <{PLANTDB}aboutPlant> ?p }}
+                 OR NOT EXISTS {{ ?m <{PLANTDB}mentionsBook> ?b }}
+                 OR NOT EXISTS {{ ?m <{PLANTDB}pages> ?n }}) }} LIMIT 6""",
+    "observation: occurrences+total+score present": f"""
+        SELECT ?o WHERE {{ ?o a <http://purl.org/linked-data/cube#Observation> .
+            FILTER (NOT EXISTS {{ ?o <{PLANTDB}occurrences> ?x }}
+                 OR NOT EXISTS {{ ?o <{PLANTDB}areaTotalOccurrences> ?t }}
+                 OR NOT EXISTS {{ ?o <{PLANTDB}prevalenceScore> ?s }}) }} LIMIT 6""",
+    "place: name+geo+areaTotal present": f"""
+        PREFIX schema: <{SCHEMA}>
+        SELECT ?a WHERE {{ ?a a <{SCHEMA}Place> .
+            FILTER (NOT EXISTS {{ ?a schema:name ?n }}
+                 OR NOT EXISTS {{ ?a schema:geo ?g }}
+                 OR NOT EXISTS {{ ?a <{PLANTDB}areaTotalOccurrences> ?t }}) }} LIMIT 6""",
+    # the four files must stitch together - a mention in books.nt that points
+    # at a plant missing from plants.nt would silently shrink Query A/C
+    "no dangling mention -> plant": f"""
+        PREFIX dwc: <http://rs.tdwg.org/dwc/terms/>
+        SELECT ?m WHERE {{ ?m a <{PLANTDB}TaxonMention> ;
+            <{PLANTDB}aboutPlant> ?p .
+            FILTER NOT EXISTS {{ ?p a <http://rs.tdwg.org/dwc/terms/Taxon> }} }} LIMIT 6""",
+    "no dangling mention -> book": f"""
+        PREFIX schema: <{SCHEMA}>
+        SELECT ?m WHERE {{ ?m a <{PLANTDB}TaxonMention> ;
+            <{PLANTDB}mentionsBook> ?b .
+            FILTER NOT EXISTS {{ ?b a <{SCHEMA}CreativeWork> }} }} LIMIT 6""",
+    "no dangling observation -> plant": f"""
+        PREFIX dwc: <http://rs.tdwg.org/dwc/terms/>
+        SELECT ?o WHERE {{ ?o a <http://purl.org/linked-data/cube#Observation> ;
+            <{PLANTDB}aboutPlant> ?p .
+            FILTER NOT EXISTS {{ ?p a <http://rs.tdwg.org/dwc/terms/Taxon> }} }} LIMIT 6""",
+    "no dangling observation -> area": f"""
+        PREFIX schema: <{SCHEMA}>
+        SELECT ?o WHERE {{ ?o a <http://purl.org/linked-data/cube#Observation> ;
+            <{PLANTDB}observedIn> ?a .
+            FILTER NOT EXISTS {{ ?a a <{SCHEMA}Place> }} }} LIMIT 6""",
+}
+
+
+STORE_DIR = "/tmp/opencode/oxigraph-full-store"
+
+
+def store_marker():
+    return STORE_DIR, os.path.join(STORE_DIR, "plantdb-marker.json")
+
+
+def open_full_store(paths, reload=False):
+    """Open an on-disk Oxigraph store holding the given .nt files (the full
+    export does not fit in RAM). Reuses the store when a marker file still
+    matches the files' size/mtime, so validate --full and handover_check.py
+    load once. Returns (store, loaded_now)."""
+    import shutil
+    marker_path = os.path.join(STORE_DIR, "plantdb-marker.json")
+    state = {p: [os.path.getsize(p), int(os.path.getmtime(p))] for p in paths}
+    if not reload and os.path.exists(marker_path) \
+            and json.load(open(marker_path)) == state:
+        return pyoxigraph.Store(STORE_DIR), False
+    shutil.rmtree(STORE_DIR, ignore_errors=True)
+    os.makedirs(STORE_DIR, exist_ok=True)
+    store = pyoxigraph.Store(STORE_DIR)
+    for p in paths:
+        with open(p, "rb") as fh:
+            store.load(fh, format=pyoxigraph.RdfFormat.N_TRIPLES)
+    json.dump(state, open(marker_path, "w"))
+    return store, True
+
+
 def load_shapes(extra=()) -> Graph:
     shapes = Graph()
     for path in SHAPES + list(extra):
@@ -150,14 +253,25 @@ def self_test() -> int:
     return 0 if ok else 1
 
 
-def oxigraph_checks(path: str) -> int:
-    """Batched prevalence contract + self-description, via Oxigraph (fast)."""
+def oxigraph_checks(paths, full=False) -> int:
+    """Batched prevalence contract + self-description (+ full-graph shape
+    rules when full), via Oxigraph. --full uses a DISK-BACKED store: the
+    full export is too big to hold in RAM."""
+    if isinstance(paths, str):
+        paths = [paths]
     t0 = time.time()
-    store = pyoxigraph.Store()
-    with open(path, "rb") as fh:
-        store.load(fh, format=pyoxigraph.RdfFormat.N_TRIPLES)
+    if full:
+        store, loaded = open_full_store(paths)
+        if not loaded:
+            print("oxigraph: reusing on-disk store (marker matches the files)")
+    else:
+        store = pyoxigraph.Store()
+        for path in paths:
+            with open(path, "rb") as fh:
+                store.load(fh, format=pyoxigraph.RdfFormat.N_TRIPLES)
     n = next(store.query("SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }"))["n"]
-    print(f"oxigraph: loaded {int(n.value):,} triples in {time.time()-t0:.0f}s")
+    print(f"oxigraph: {int(n.value):,} triples from {len(paths)} file(s) "
+          f"in {time.time()-t0:.0f}s")
 
     rc = 0
     t0 = time.time()
@@ -182,12 +296,28 @@ def oxigraph_checks(path: str) -> int:
               + (f" ({detail})" if problem else ""))
         if problem:
             rc = 1
+
+    if full:
+        for title, q in FULL_CONTRACT_QUERIES.items():
+            t0 = time.time()
+            rows = list(store.query(q))
+            problem = bool(rows)
+            detail = ", ".join(", ".join(map(str, r.values())) for r in rows[:3])
+            print(f"contract ({time.time()-t0:.0f}s): {title}: "
+                  f"{'FAIL' if problem else 'PASS'}"
+                  + (f" ({detail})" if problem else ""))
+            if problem:
+                rc = 1
     return rc
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--graph", default=DATA, help="N-Triples file to validate")
+    ap.add_argument("--full", action="store_true",
+                    help="validate the four full-export files (batched "
+                         "contract queries over the whole graph; pySHACL "
+                         "then re-runs on the slice)")
     ap.add_argument("--self-test", action="store_true",
                     help="validate the broken example instead: it must fail")
     args = ap.parse_args()
@@ -195,11 +325,24 @@ def main():
     if args.self_test:
         sys.exit(self_test())
 
-    rc = oxigraph_checks(args.graph)
+    if args.full:
+        d = "plant_data/rdf"
+        paths = [f"{d}/{f}" for f in
+                 ("plants.nt", "areas.nt", "observations.nt", "books.nt")]
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            sys.exit(f"missing: {missing} - run build_rdf.py --full first")
+        rc = oxigraph_checks(paths, full=True)
+        print(f"pySHACL over the full export is out of reach for rdflib - "
+              f"same shapes re-checked on the slice:")
+        graph_path = DATA
+    else:
+        rc = oxigraph_checks(args.graph)
+        graph_path = args.graph
 
     t0 = time.time()
     g = Graph()
-    g.parse(args.graph, format="nt")
+    g.parse(graph_path, format="nt")
     print(f"rdflib: loaded {len(g):,} triples in {time.time()-t0:.0f}s")
     shapes = load_shapes()  # NOT COMPONENTS: those ran batched, above
     t0 = time.time()
