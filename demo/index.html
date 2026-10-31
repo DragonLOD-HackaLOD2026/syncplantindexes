@@ -57,18 +57,18 @@ document.getElementById('plant').addEventListener('change', async e => {
                   (p.books_dutch ? `, ${p.books_dutch} Dutch` : '');
     out.appendChild(h);
     const t = document.createElement('table');
-    t.innerHTML = '<tr><th>Book</th><th>Author of book</th><th>Pages</th>' +
-                  '<th>Years cited</th><th>Copy</th></tr>' +
+    t.innerHTML = '<tr><th>Book</th><th>Author</th><th>Published</th><th>Pages</th>' +
+                  '<th>Copy</th></tr>' +
         p.citations.map(c => `<tr>
           <td><a href="${c.item_url || c.title_url}" target="_blank">${c.title}</a></td>
           <td>${c.book_author || ''}</td>
+          <td class="num">${c.pub_year ?? ''}</td>
           <td class="num">${c.pages}</td>
-          <td>${c.first_year ?? ''}${c.last_year && c.first_year != c.last_year ? '–' + c.last_year : ''}</td>
           <td>${[c.institution, c.volume].filter(Boolean).join(' · ')}</td></tr>`).join('');
     out.appendChild(t);
     if (p.books > p.citations.length) {
       const more = document.createElement('p'); more.className = 'sub';
-      more.textContent = `Showing the ${p.citations.length} most-mentioned of ${p.books} books.`;
+      more.textContent = `Showing the ${p.citations.length} oldest of ${p.books} books.`;
       out.appendChild(more);
     }
   }

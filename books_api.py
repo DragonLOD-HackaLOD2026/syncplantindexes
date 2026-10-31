@@ -100,24 +100,32 @@ WHERE ekey = $acc AND (NOT $dutch OR dutch <> '')"""
 
 CITATIONS_SQL = f"""
 SELECT title_id, nname AS mention_name,
-       title, short_title, book_author,
+       title, short_title,
+       -- TL2Author is populated for only 231 of 205k BHL titles; BHL usually
+       -- puts the author at the end of FullTitle after " / "
+       coalesce(nullif(book_author, ''),
+                nullif(regexp_extract(title, ' / ([^/]{{3,}})$', 1), '')) AS book_author,
+       coalesce(start_year, first_year) AS pub_year,
        pages, copies, first_year, last_year, start_year, end_year,
        language_code, published_place, dutch,
        volume, institution, call_number, item_url, pdf_url, title_url
 FROM '{BOOKS}'
 WHERE ekey = $acc AND (NOT $dutch OR dutch <> '')
-ORDER BY pages DESC, title
+ORDER BY pub_year NULLS LAST, pages DESC, title
 LIMIT $limit OFFSET $offset"""
 
 UNLINKED_SQL = f"""
 SELECT title_id, nname AS mention_name,
-       title, short_title, book_author,
+       title, short_title,
+       coalesce(nullif(book_author, ''),
+                nullif(regexp_extract(title, ' / ([^/]{{3,}})$', 1), '')) AS book_author,
+       coalesce(start_year, first_year) AS pub_year,
        pages, copies, first_year, last_year, start_year, end_year,
        language_code, published_place, dutch,
        volume, institution, call_number, item_url, pdf_url, title_url
 FROM '{UNLINKED}'
 WHERE nname = $nname AND (NOT $dutch OR dutch <> '')
-ORDER BY pages DESC, title
+ORDER BY pub_year NULLS LAST, pages DESC, title
 LIMIT $limit OFFSET $offset"""
 
 
@@ -154,7 +162,7 @@ def plant_block(c, acc: str, matched_name: str, matched_status: str,
     rows = c.execute(CITATIONS_SQL, {"acc": acc, "dutch": dutch_only,
                                      "limit": limit, "offset": offset}).fetchall()
     t.lap("citations")
-    cols = ["title_id", "mention_name", "title", "short_title", "book_author",
+    cols = ["title_id", "mention_name", "title", "short_title", "book_author", "pub_year",
             "pages", "copies", "first_year", "last_year", "start_year", "end_year",
             "language_code", "published_place", "dutch", "volume", "institution",
             "call_number", "item_url", "pdf_url", "title_url"]
@@ -210,7 +218,7 @@ def by_unlinked_name(c, nname: str, dutch_only: bool, limit: int, offset: int,
     t.lap("unlinked")
     if not rows:
         return []
-    cols = ["title_id", "mention_name", "title", "short_title", "book_author",
+    cols = ["title_id", "mention_name", "title", "short_title", "book_author", "pub_year",
             "pages", "copies", "first_year", "last_year", "start_year", "end_year",
             "language_code", "published_place", "dutch", "volume", "institution",
             "call_number", "item_url", "pdf_url", "title_url"]
