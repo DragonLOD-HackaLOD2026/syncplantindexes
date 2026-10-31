@@ -165,6 +165,7 @@ unlike the gitignored `plant_data/`); `seed/README.md` explains each one.
 | `build_status.py` | Turns `ranges` into answers: `taxon_ranges` (native / introduced range per taxon), `nl_status` (what each source says about the Netherlands, plus one resolved verdict) and the `tdwg_regions` gazetteer | ~3 s, reads `seed/nl_regions.csv` |
 | `gbif_nl.py` | Asks GBIF's SQL download API for all plant occurrences in the Netherlands **grouped by species × GADM area** — the GROUP BY runs on GBIF's server, so the whole country comes back as 538 K rows / 38 MB instead of tens of millions of points. Needs a GBIF login; prints the DOI to cite | ~5–10 min on GBIF's side, 38 MB |
 | `build_obs.py` | Folds that download into `observations_nl` (plant × municipality), `obs_areas` (names, centroids, bboxes from the GADM GeoJSON) and `nl_totals`; links GBIF names to `plant_index` by name | ~2 s |
+| `build_rdf.py` | Exports the index as **N-Triples** for SPARQL serving: plants (synonyms become `skos:altLabel`, never entities), the 355 gemeenten as `schema:Place`, observation facts with pre-computed prevalence scores (zeros included), and BHL books as `schema:CreativeWork` with mentions rolled up to the accepted plant. Every `plantdb:` fact carries its own label + plain-language definition in the file. `--slice 200` exports just the most-observed plants + edge cases (the prototype) | slice: ~20 s, 2.3 M triples; full run: issue #15 |
 | `status.py` | **Quality check**: prints a scorecard of every source file, table, id coverage, and cross-reference (and writes `plant_data/quality_report.md`). Read-only, so run it as often as you like; exit code 1 means something failed | seconds |
 | `plant_query.py` | The questions as Python functions: `plants(name_or_id)`, `books(name, dutch=…)`, `origin(name)`, `nl_status(name, status=…)`, `observations(name, area=…, status=…)`, `obs_totals()`, `areas()`. Read-only, resolves names and ids, suggests close names on a typo | about a second per question |
 
@@ -178,6 +179,7 @@ python build_books.py     # which books mention which plant (and which are Dutch
 python build_status.py    # origin + native/alien/invasive in the Netherlands
 python gbif_nl.py --admin 2   # where each plant was recorded in the NL (asks for a login)
 python build_obs.py       # plant × municipality record counts + areas for maps
+python build_rdf.py --slice 200   # RDF for SPARQL: a slice first, no flag = everything
 python status.py          # what is in there, and did it join well?
 ```
 
