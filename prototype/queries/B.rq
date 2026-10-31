@@ -1,0 +1,22 @@
+# Query B: the whole municipality map for one plant - all 355 Dutch areas,
+# with a pre-computed prevalence score (0 = never observed there).
+# Sortable straight out of the query: ORDER BY DESC(?score).
+PREFIX qb:     <http://purl.org/linked-data/cube#>
+PREFIX schema: <https://schema.org/>
+PREFIX dwc:    <http://rs.tdwg.org/dwc/terms/>
+PREFIX skos:   <http://www.w3.org/2004/02/skos/core#>
+PREFIX plantdb: <https://plantdb.example.org/def/>
+SELECT DISTINCT ?areaName ?province ?occurrences ?areaTotal ?score WHERE {
+  VALUES ?lookup { "{{NAME}}" }
+  ?plant (dwc:scientificName | plantdb:normalizedName | skos:altLabel) ?found .
+  FILTER (lcase(str(?found)) = lcase(?lookup))
+  ?fact a qb:Observation ;
+        plantdb:aboutPlant ?plant ;
+        plantdb:observedIn ?area ;
+        plantdb:occurrences ?occurrences ;
+        plantdb:prevalenceScore ?score .
+  ?area schema:name ?areaName ;
+        schema:administrativeArea ?province ;
+        plantdb:areaTotalOccurrences ?areaTotal .
+}
+ORDER BY DESC(?score) ?areaName

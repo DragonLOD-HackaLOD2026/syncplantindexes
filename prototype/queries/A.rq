@@ -1,0 +1,22 @@
+# Query A: everything we know about one plant, looked up by name.
+# ?lookup matches the display name, the lower-case normalised name, or any
+# synonym (skos:altLabel) - case-insensitive. Every plantdb: predicate comes
+# back with its English rdfs:label, and vocabulary values (the Dutch status)
+# come back with their label instead of a bare URI, so the app can show them.
+PREFIX rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs:   <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skos:   <http://www.w3.org/2004/02/skos/core#>
+PREFIX dwc:    <http://rs.tdwg.org/dwc/terms/>
+PREFIX plantdb: <https://plantdb.example.org/def/>
+SELECT DISTINCT ?predicate ?fieldLabel ?valueOut WHERE {
+  VALUES ?lookup { "{{NAME}}" }
+  ?plant (dwc:scientificName | plantdb:normalizedName | skos:altLabel) ?found .
+  FILTER (lcase(str(?found)) = lcase(?lookup))
+  ?plant ?predicate ?value .
+  FILTER (?predicate != rdf:type)
+  OPTIONAL { ?predicate rdfs:label ?pl FILTER (lang(?pl) = 'en') }
+  OPTIONAL { ?value rdfs:label ?vl FILTER (lang(?vl) = 'en') }
+  BIND(COALESCE(STR(?vl), STR(?value)) AS ?valueOut)
+  BIND(COALESCE(STR(?pl), STR(?predicate)) AS ?fieldLabel)
+}
+ORDER BY ?fieldLabel

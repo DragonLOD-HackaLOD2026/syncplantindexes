@@ -1,0 +1,26 @@
+# Query C: the books that mention one plant, with the page counts that
+# justify the citation. The Dutch filter lives IN THE QUERY: ?dutchOnly = true
+# keeps only Dutch books (in Dutch or published in the Netherlands); false
+# returns every book. The BHL link comes back as part of the citation.
+PREFIX schema: <https://schema.org/>
+PREFIX dwc:    <http://rs.tdwg.org/dwc/terms/>
+PREFIX skos:   <http://www.w3.org/2004/02/skos/core#>
+PREFIX plantdb: <https://plantdb.example.org/def/>
+SELECT DISTINCT ?pages ?title ?author ?yearFrom ?yearTo ?bhlUrl WHERE {
+  VALUES ?lookup { "{{NAME}}" }
+  VALUES ?dutchOnly { {{DUTCH}} }
+  ?plant (dwc:scientificName | plantdb:normalizedName | skos:altLabel) ?found .
+  FILTER (lcase(str(?found)) = lcase(?lookup))
+  ?mention a plantdb:TaxonMention ;
+           plantdb:aboutPlant ?plant ;
+           plantdb:mentionsBook ?book ;
+           plantdb:pages ?pages .
+  ?book schema:name ?title ;
+        plantdb:dutchRelevance ?dutch .
+  FILTER (?dutch = ?dutchOnly || ?dutchOnly = false)
+  OPTIONAL { ?book plantdb:authorOfBook ?author }
+  OPTIONAL { ?book plantdb:coverageStartYear ?yearFrom }
+  OPTIONAL { ?book plantdb:coverageEndYear ?yearTo }
+  OPTIONAL { ?book schema:url ?bhlUrl }
+}
+ORDER BY DESC(?pages) ?title

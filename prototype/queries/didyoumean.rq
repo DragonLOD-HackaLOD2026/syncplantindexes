@@ -1,0 +1,14 @@
+# Did-you-mean fallback: plain SPARQL 1.1 substring search over every name
+# an entity answers to (display name, normalised name, synonym labels).
+# The app types a fragment, gets candidate plants back, then re-runs A/B/C
+# with the chosen name. On QLever the MATCH operator adds fuzzy ranking as a
+# bonus; this query is the portable floor that must always work.
+PREFIX dwc:    <http://rs.tdwg.org/dwc/terms/>
+PREFIX skos:   <http://www.w3.org/2004/02/skos/core#>
+PREFIX plantdb: <https://plantdb.example.org/def/>
+SELECT DISTINCT ?plant ?name WHERE {
+  VALUES ?fragment { "{{NAME}}" }
+  ?plant (dwc:scientificName | plantdb:normalizedName | skos:altLabel) ?name .
+  FILTER (CONTAINS(lcase(str(?name)), lcase(?fragment)))
+}
+LIMIT 200
