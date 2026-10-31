@@ -1,0 +1,24 @@
+# Everything we know about one plant, one row, named columns.
+# plantdb:normalizedName is the scientificName in lower case - that is the
+# lookup key. Change the name on the next line to look up another plant.
+PREFIX dwc:     <http://rs.tdwg.org/dwc/terms/>
+PREFIX rdfs:    <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX plantdb: <https://plantdb.example.org/def/>
+SELECT ?scientificName ?author ?family ?rank ?nlStatus ?arrivalYear
+       ?areasSeenInNl ?observationsInNl
+       ?firstObservationYear ?lastObservationYear ?booksMentioning
+WHERE {
+  ?plant plantdb:normalizedName "crassula helmsii" ;
+         dwc:scientificName ?scientificName .
+  OPTIONAL { ?plant dwc:scientificNameAuthorship ?author }
+  OPTIONAL { ?plant dwc:family ?family }
+  OPTIONAL { ?plant dwc:taxonRank ?rank }
+  OPTIONAL { ?plant plantdb:nlStatus ?statusUri .
+             ?statusUri rdfs:label ?nlStatus }
+  OPTIONAL { ?plant plantdb:arrivalYear ?arrivalYear }
+  OPTIONAL { ?plant plantdb:nlAreaCount ?areasSeenInNl }
+  OPTIONAL { ?plant plantdb:nlOccurrenceCount ?observationsInNl }
+  OPTIONAL { ?plant plantdb:firstObservationYear ?firstObservationYear }
+  OPTIONAL { ?plant plantdb:lastObservationYear ?lastObservationYear }
+  OPTIONAL { ?plant plantdb:bhlTitleCount ?booksMentioning }
+}

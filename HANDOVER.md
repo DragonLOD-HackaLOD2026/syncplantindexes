@@ -84,8 +84,9 @@ Expected sizes below were verified against the source database.
 One row per fact: predicate, English label, value. Identity, external ids,
 origin, NL status (returned as the term's label, not a bare URI), BHL
 counts, NL observation totals. Lookup is case-insensitive and also matches
-synonyms. Expected: 45 facts for "Crassula helmsii" (which is found via a
-synonym label); well-studied plants return 60-80.
+synonyms ("Crassula recurva (Hook.f.) Ostenf.", a synonym of Crassula
+helmsii, returns the same 45 facts). Expected on this export: 45 facts for
+"Crassula helmsii" (verified).
 
 ```sparql
 PREFIX rdf:    <http://www.w3.org/1999-02-22-rdf-syntax-ns#>
@@ -115,8 +116,9 @@ Returns **every** gemeente, including where the plant was never seen
 (occurrences 0, score 0). `?score` is pre-computed: occurrences divided by
 the area's total plant records, 0-1, rounded to 6 decimals; `?score > 0`
 exactly when `?occurrences > 0`. Expected: exactly 355 rows for any known
-plant; e.g. Heracleum mantegazzianum nonzero in all 355, amelanchier
-lamarckii (lower-case name also works) with a long tail of zeros.
+plant; e.g. Heracleum mantegazzianum nonzero in 349 of 355, amelanchier
+lamarckii nonzero in 334 of 355 (lower-case name also works). Sample rows
+for both are in `queries/EXAMPLES.md`.
 
 ```sparql
 PREFIX qb:     <http://purl.org/linked-data/cube#>

@@ -1047,7 +1047,7 @@ def main():
         if os.path.exists("HANDOVER.md"):
             shutil.copy("HANDOVER.md", os.path.join(OUT_DIR, "HANDOVER.md"))
             os.makedirs(os.path.join(OUT_DIR, "queries"), exist_ok=True)
-            for rq in glob.glob("prototype/queries/*.rq"):
+            for rq in glob.glob("prototype/queries/*"):
                 shutil.copy(rq, os.path.join(OUT_DIR, "queries"))
         print(f"wrote {len(FULL_FILES)} files + manifest.json in "
               f"{counts['seconds']}s; {counts['triples']:,} triples")

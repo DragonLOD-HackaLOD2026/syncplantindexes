@@ -1,0 +1,19 @@
+# All plants in this slice, one row per plant.
+# Run it as-is: the slice contains exactly these 10 plants.
+PREFIX dwc:     <http://rs.tdwg.org/dwc/terms/>
+PREFIX rdfs:    <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX plantdb: <https://plantdb.example.org/def/>
+SELECT ?scientificName ?family ?nlStatus ?areasSeenInNl ?observationsInNl
+       ?firstObservationYear ?lastObservationYear
+WHERE {
+  ?plant a dwc:Taxon ;
+         dwc:scientificName ?scientificName .
+  OPTIONAL { ?plant dwc:family ?family }
+  OPTIONAL { ?plant plantdb:nlStatus ?statusUri .
+             ?statusUri rdfs:label ?nlStatus }
+  OPTIONAL { ?plant plantdb:nlAreaCount ?areasSeenInNl }
+  OPTIONAL { ?plant plantdb:nlOccurrenceCount ?observationsInNl }
+  OPTIONAL { ?plant plantdb:firstObservationYear ?firstObservationYear }
+  OPTIONAL { ?plant plantdb:lastObservationYear ?lastObservationYear }
+}
+ORDER BY DESC(?observationsInNl) ?scientificName

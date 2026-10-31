@@ -1,0 +1,15 @@
+# Where one plant is native: the actual geographic regions, by name, one row
+# each. A narrow native range is exported as region names (plantdb:nativeRegion,
+# e.g. 'Transcaucasus'); a wide one as region groups (plantdb:nativeGroup,
+# e.g. 'Caucasus'). Exactly one of the two per plant, so the UNION covers all.
+PREFIX dwc:     <http://rs.tdwg.org/dwc/terms/>
+PREFIX plantdb: <https://plantdb.example.org/def/>
+SELECT ?scientificName ?nativeRegion
+WHERE {
+  ?plant plantdb:normalizedName "quercus robur" ;
+         dwc:scientificName ?scientificName .
+  { ?plant plantdb:nativeRegion ?nativeRegion }
+  UNION
+  { ?plant plantdb:nativeGroup  ?nativeRegion }
+}
+ORDER BY ?nativeRegion

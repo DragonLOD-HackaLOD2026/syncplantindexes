@@ -42,6 +42,27 @@ https://github.com/saulshanabrook/pfaf-data
 
 The LOTUS Initiative for Open Natural Products Research: wikidata query results
 https://zenodo.org/records/5668855
+(parked: entirely Wikidata-keyed, our wikidata_qid is empty; chemical data not needed yet)
 
 Amidha Ayurveda Herb Database v2.0
 https://github.com/sciencewithsaucee-sudo/herb-database
+(parked: 360 entries, 354 match plant_index, but too little overlap with the NL heritage data)
+
+Dr. Duke's Phytochemical and Ethnobotanical Databases (USDA)
+https://phytochem.nal.usda.gov/ - catalog: https://catalog.data.gov/dataset/dr-dukes-phytochemical-and-ethnobotanical-databases
+Held as plant_data/dr_duke/Duke-Source-CSV.zip (13 tables, data dictionary in
+DrDukesDatabaseDataDictionary-prelim.csv). Public domain (US government work).
+Used (build_duke.py -> plant_data/duke.duckdb, a *parallel* store - plant_index.duckdb is
+never touched, matching reads plant_index.parquet):
+  ETHNOBOT 82,873 use-claims (plant x activity x country x reference; 13,010 plants,
+  2,235 activities, 711 country values incl. 'Europe' 996, 'Dutch' 168, 'Netherlands' 5)
+  FNFTAX 2,376 curated taxa with the USEAGE flag (M medicinal 1,711, F food 295, G general)
+  ACTIVITIES / SUPERACT / REFERENCES: vocabularies (activity -> broad category, cites)
+Parked tables: FARMACY/CHEMICALS/AGGREGAC/CHEM_MEANS/DOSAGE/ASSAY (chemical composition -
+same territory as LOTUS) and YIELDS (crop trials).
+Caveats measured: names are plain text with no external ids; 11,204 of 15,911 distinct
+Duke name+authority strings link to plant_index (9,789 distinct names, 65,718 of the
+82,873 use rows), 79% of use rows get a wfo_id; unlinked ones are Duke-era misspellings
+(Hippuris vulgare), synonyms WFO files differently, and non-plants (the alga Rhodymenia
+palmata). Infraspecific rows (206) roll up to their binomial.
+
