@@ -1,0 +1,178 @@
+# plantdb shapes: the three app queries as SHACL constraints.
+#
+# SHACL validates data, not queries - so every assumption queries A, B and C
+# make about the export is encoded here as a constraint. If the export passes,
+# the queries can rely on it. Deliberately broken examples in examples/bad.nt
+# must fail these shapes (run validate_rdf.py --self-test).
+#
+# The NDE SCHEMA-AP shapes (shacl/nde-schema-ap.ttl, vendored) validate in the
+# same pass against the nodes we type schema:CreativeWork / schema:Place /
+# schema:DefinedTerm. Their Person/Organization shapes must stay silent:
+# authors are plain string literals by design (issue #11 decision 4).
+
+@prefix sh:     <http://www.w3.org/ns/shacl#> .
+@prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos:   <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+@prefix schema: <https://schema.org/> .
+@prefix dwc:    <http://rs.tdwg.org/dwc/terms/> .
+@prefix qb:     <http://purl.org/linked-data/cube#> .
+@prefix plantdb: <https://plantdb.example.org/def/> .
+
+# --------------------------------------------------------------------------
+# Query A - a plant is findable and explainable
+# --------------------------------------------------------------------------
+
+plantdb:PlantShape a sh:NodeShape ;
+    sh:name "Plant (Query A)" ;
+    sh:targetClass schema:BioChemEntity ;
+    sh:nodeKind sh:IRI ;
+    sh:property [
+        sh:path dwc:scientificName ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:message "Every plant has exactly one display name."@en ;
+    ] , [
+        sh:path plantdb:normalizedName ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:message "Every plant has exactly one lower-case name for lookup."@en ;
+    ] , [
+        sh:path dwc:taxonomicStatus ; sh:maxCount 1 ;
+    ] , [
+        sh:path dwc:taxonRank ; sh:maxCount 1 ;
+    ] , [
+        sh:path dwc:family ; sh:maxCount 1 ;
+    ] , [
+        sh:path skos:altLabel ; sh:datatype xsd:string ;
+        sh:message "Synonym labels must be plain strings."@en ;
+    ] , [
+        sh:path plantdb:nlStatus ; sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ; sh:class schema:DefinedTerm ;
+        sh:message "The Dutch status value must be a DefinedTerm URI."@en ;
+    ] , [
+        sh:path plantdb:arrivalYear ;
+        sh:datatype xsd:integer ; sh:minCount 0 ; sh:maxCount 1 ;
+        sh:minInclusive 1500 ; sh:maxInclusive 2100 ;
+    ] , [
+        sh:path plantdb:bhlTitleCount ;
+        sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ;
+    ] , [
+        sh:path plantdb:dutchTitleCount ;
+        sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ;
+    ] .
+
+# NL status vocabulary: every term the app may show explains itself
+plantdb:StatusTermShape a sh:NodeShape ;
+    sh:name "Status vocabulary term" ;
+    sh:targetClass schema:DefinedTerm ;
+    sh:nodeKind sh:IRI ;
+    sh:property [
+        sh:path rdfs:label ; sh:datatype rdf:langString ;
+        sh:minCount 1 ;
+        sh:message "A vocabulary term needs a language-tagged label."@en ;
+    ] .
+
+# --------------------------------------------------------------------------
+# Query B - complete municipality map, sortable prevalence
+# --------------------------------------------------------------------------
+
+plantdb:AreaShape a sh:NodeShape ;
+    sh:name "Dutch area (Query B)" ;
+    sh:targetClass schema:Place ;
+    sh:nodeKind sh:IRI ;
+    sh:property [
+        sh:path plantdb:areaTotalOccurrences ;
+        sh:datatype xsd:integer ; sh:minCount 1 ; sh:maxCount 1 ;
+        sh:minInclusive 1 ;
+        sh:message "Every area needs its record total - the prevalence denominator."@en ;
+    ] , [
+        sh:path plantdb:plantSpeciesCount ;
+        sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ;
+    ] .
+
+plantdb:ObservationShape a sh:NodeShape ;
+    sh:name "Observation fact (Query B)" ;
+    sh:targetClass qb:Observation ;
+    sh:nodeKind sh:IRI ;
+    # tolerances match the exporter: prevalence scores are rounded to 6 decimals
+    plantdb:zeroTolerance 0.0000005 ;
+    plantdb:ZeroImpliesZeroConstraint () ;
+    plantdb:scoreTolerance 0.0000005 ;
+    plantdb:ScoreFormulaConstraint () ;
+    sh:property [
+        sh:path plantdb:aboutPlant ;
+        sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+        sh:message "An observation fact links exactly one plant."@en ;
+    ] , [
+        sh:path plantdb:observedIn ;
+        sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+        sh:message "An observation fact links exactly one area."@en ;
+    ] , [
+        sh:path plantdb:occurrences ;
+        sh:datatype xsd:integer ; sh:minCount 1 ; sh:maxCount 1 ;
+        sh:minInclusive 0 ;
+        sh:message "Occurrences: exactly one non-negative integer."@en ;
+    ] , [
+        sh:path plantdb:areaTotalOccurrences ;
+        sh:datatype xsd:integer ; sh:minCount 1 ; sh:maxCount 1 ;
+        sh:minInclusive 1 ;
+        sh:message "The area total is the denominator - must be >= 1."@en ;
+    ] , [
+        sh:path plantdb:prevalenceScore ;
+        sh:datatype xsd:decimal ; sh:minCount 1 ; sh:maxCount 1 ;
+        sh:minInclusive 0 ; sh:maxInclusive 1 ;
+        sh:message "Prevalence: exactly one decimal between 0 and 1."@en ;
+    ] , [
+        sh:path plantdb:firstRecordYear ;
+        sh:datatype xsd:integer ; sh:maxCount 1 ;
+    ] , [
+        sh:path plantdb:lastRecordYear ;
+        sh:datatype xsd:integer ; sh:maxCount 1 ;
+    ] .
+
+# The two custom constraint components invoked above (zero <=> zero, and
+# score = occurrences / area total) live in plantdb-components.ttl. They are
+# real SHACL components - the --self-test runs them that way on the broken
+# example. Over big data, validate_rdf.py instead runs the same two checks as
+# ONE batched SPARQL query via Oxigraph, because pySHACL+rdflib would run a
+# separate query per observation (tens of thousands) and crawl.
+
+# --------------------------------------------------------------------------
+# Query C - every mention carries its page count, every book its flags
+# --------------------------------------------------------------------------
+
+plantdb:MentionShape a sh:NodeShape ;
+    sh:name "Book mention (Query C)" ;
+    sh:targetClass plantdb:TaxonMention ;
+    sh:nodeKind sh:IRI ;
+    sh:property [
+        sh:path plantdb:aboutPlant ;
+        sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+        sh:message "A mention links exactly one plant."@en ;
+    ] , [
+        sh:path plantdb:mentionsBook ;
+        sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+        sh:message "A mention links exactly one book."@en ;
+    ] , [
+        sh:path plantdb:pages ;
+        sh:datatype xsd:integer ; sh:minCount 1 ; sh:maxCount 1 ;
+        sh:minInclusive 1 ;
+        sh:message "A mention carries exactly one page count >= 1."@en ;
+    ] .
+
+plantdb:BookShape a sh:NodeShape ;
+    sh:name "Book (Query C)" ;
+    sh:targetClass schema:CreativeWork ;
+    sh:property [
+        sh:path plantdb:dutchRelevance ;
+        sh:datatype xsd:boolean ; sh:minCount 1 ; sh:maxCount 1 ;
+        sh:message "Every book carries the Dutch filter flag exactly once."@en ;
+    ] , [
+        sh:path plantdb:dutchLanguage ;
+        sh:datatype xsd:boolean ; sh:minCount 1 ; sh:maxCount 1 ;
+    ] , [
+        sh:path plantdb:dutchPublished ;
+        sh:datatype xsd:boolean ; sh:minCount 1 ; sh:maxCount 1 ;
+    ] .

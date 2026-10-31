@@ -30,9 +30,12 @@ No Wikidata anything (parked, issue #2).
 import argparse
 import os
 import sys
+from datetime import date, timezone, datetime
 from urllib.parse import quote
 
 import duckdb
+
+EXPORT_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # xsd:date form
 
 DB = "plant_data/plant_index.duckdb"
 OUT_DIR = "plant_data/rdf"
@@ -168,10 +171,12 @@ def I(iri: str) -> str:  # noqa: E743 - Iri
 def L(value, lang=None, dt=None) -> str:
     if isinstance(value, bool):
         return f'"{"true" if value else "false"}"^^<{XSD}boolean>'
+    if isinstance(value, float):
+        # 9 decimals: the SHACL check recomputes occurrences / areaTotal and
+        # compares within 1e-9, so rounding must stay below that
+        return f'"{value:.9f}"^^<{XSD}decimal>'
     if isinstance(value, int):
         return f'"{value}"^^<{XSD}integer>'
-    if isinstance(value, float):
-        return f'"{value:.6f}"^^<{XSD}decimal>'
     if lang:
         return f'"{esc(str(value))}"@{lang}'
     if dt:
@@ -481,6 +486,9 @@ def export(con, fh, slice_keys=None):
         if tid not in books_seen:
             b = I(bu)
             ex.tri(b, I(RDF_TYPE), I(SCHEMA + "CreativeWork"))
+            # NDE SCHEMA-AP requires exactly one sdDatePublished per CreativeWork:
+            # the date this record was last (re)generated.
+            ex.tri(b, I(SCHEMA + "sdDatePublished"), f'"{EXPORT_DATE}"^^<{XSD}date>')
             if full_title:
                 ex.fact(b, SCHEMA + "name", full_title, lang="mul")
             ex.fact(b, PRED + "authorOfBook", author_of_book)

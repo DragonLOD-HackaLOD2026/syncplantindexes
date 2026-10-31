@@ -1,0 +1,45 @@
+# SPARQL-based SHACL constraint components for the prevalence contract.
+#
+# These are real sh:ConstraintComponents: plantdb-shapes.ttl invokes them on
+# plantdb:ObservationShape with a tolerance parameter. validate_rdf.py loads
+# this file only where per-node execution is cheap (the --self-test on
+# examples/bad.nt). Over real data the same two checks run as one batched
+# SPARQL query in validate_rdf.py (Oxigraph), because pySHACL would ask a
+# separate SPARQL query per observation.
+
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix plantdb: <https://plantdb.example.org/def/> .
+
+# never observed <=> score exactly 0 (so the app can trust zero rows)
+plantdb:ZeroImpliesZeroConstraint a sh:ConstraintComponent ;
+    sh:name "zero occurrences <=> zero prevalence"@en ;
+    sh:parameter [ sh:path plantdb:zeroTolerance ; sh:datatype xsd:decimal ;
+                   sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:nodeValidator [ a sh:SPARQLSelectValidator ;
+        sh:select """
+            PREFIX plantdb: <https://plantdb.example.org/def/>
+            PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+            SELECT $this WHERE {
+                $this plantdb:occurrences ?o ; plantdb:prevalenceScore ?s .
+                FILTER ((?o = 0 && ?s != 0)
+                        || (?o > 0 && xsd:double(?s) < xsd:double(?zeroTolerance)))
+            }""" ] .
+
+# score really is occurrences / area total (within rounding tolerance)
+plantdb:ScoreFormulaConstraint a sh:ConstraintComponent ;
+    sh:name "prevalence = occurrences / area total"@en ;
+    sh:parameter [ sh:path plantdb:scoreTolerance ; sh:datatype xsd:decimal ;
+                   sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:nodeValidator [ a sh:SPARQLSelectValidator ;
+        sh:select """
+            PREFIX plantdb: <https://plantdb.example.org/def/>
+            PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+            SELECT $this WHERE {
+                $this plantdb:occurrences ?o ;
+                      plantdb:areaTotalOccurrences ?t ;
+                      plantdb:prevalenceScore ?score .
+                FILTER (abs(xsd:double(?score)
+                            - xsd:double(?o) / xsd:double(?t))
+                        > xsd:double(?scoreTolerance))
+            }""" ] .

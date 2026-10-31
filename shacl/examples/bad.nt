@@ -1,0 +1,41 @@
+<urn:bad:plant1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/BioChemEntity> .
+# plant WITHOUT dwc:scientificName (Query A breakage)
+<urn:bad:plant1> <https://plantdb.example.org/def/normalizedName> "quercus robur" .
+
+# observation: never seen but prevalence 0.5 (Query B: zero rows must be exactly 0)
+<urn:bad:obsZero> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://purl.org/linked-data/cube#Observation> .
+<urn:bad:obsZero> <https://plantdb.example.org/def/aboutPlant> <urn:bad:plant1> .
+<urn:bad:obsZero> <https://plantdb.example.org/def/observedIn> <urn:bad:area1> .
+<urn:bad:obsZero> <https://plantdb.example.org/def/occurrences> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<urn:bad:obsZero> <https://plantdb.example.org/def/areaTotalOccurrences> "1000"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<urn:bad:obsZero> <https://plantdb.example.org/def/prevalenceScore> "0.500000000"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+
+# observation: prevalence above 1 and not equal to occurrences/areaTotal
+<urn:bad:obsRange> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://purl.org/linked-data/cube#Observation> .
+<urn:bad:obsRange> <https://plantdb.example.org/def/aboutPlant> <urn:bad:plant1> .
+<urn:bad:obsRange> <https://plantdb.example.org/def/observedIn> <urn:bad:area1> .
+<urn:bad:obsRange> <https://plantdb.example.org/def/occurrences> "500"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<urn:bad:obsRange> <https://plantdb.example.org/def/areaTotalOccurrences> "1000"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<urn:bad:obsRange> <https://plantdb.example.org/def/prevalenceScore> "1.500000000"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+
+# observation: occurrences missing entirely
+<urn:bad:obsNoCount> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://purl.org/linked-data/cube#Observation> .
+<urn:bad:obsNoCount> <https://plantdb.example.org/def/aboutPlant> <urn:bad:plant1> .
+<urn:bad:obsNoCount> <https://plantdb.example.org/def/observedIn> <urn:bad:area1> .
+<urn:bad:obsNoCount> <https://plantdb.example.org/def/areaTotalOccurrences> "1000"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<urn:bad:obsNoCount> <https://plantdb.example.org/def/prevalenceScore> "0.000000000"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+
+# area without its total (prevalence denominator missing)
+<urn:bad:area1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Place> .
+<urn:bad:area1> <https://schema.org/name> "Badplaats"@nl .
+
+# book without schema:name (NDE SCHEMA-AP) and without dutch flags (Query C filter)
+<urn:bad:book1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/CreativeWork> .
+
+# mention without its page count (Query C column)
+<urn:bad:mention1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://plantdb.example.org/def/TaxonMention> .
+<urn:bad:mention1> <https://plantdb.example.org/def/aboutPlant> <urn:bad:plant1> .
+<urn:bad:mention1> <https://plantdb.example.org/def/mentionsBook> <urn:bad:book1> .
+
+# vocabulary term without label (app could not explain it)
+<urn:bad:term1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/DefinedTerm> .
