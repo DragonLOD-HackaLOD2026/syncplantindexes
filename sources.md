@@ -25,6 +25,24 @@ and there is **no pathway column** - the metadata says pathways are only "planne
 Names carry authorship ("Acer negundo L.") and the file contains doubly-encoded UTF-8
 ("LidÃ©n"), which does not affect name matching.
 
+GBIF occurrences in the Netherlands (species x GADM area)
+Downloaded through GBIF's SQL download API (gbif_nl.py, `--admin 2`): a GROUP BY over the
+occurrence store that runs on GBIF's servers. Ours is DOI 10.15468/dl.jzdpzg
+(0018549-261023074918325, downloaded 2026-10-31): 538,048 rows = 12,310 species names x 426
+GADM level-2 areas, 33,601,025 records, years 1510-2026. Cite the DOI, and note the query
+runs against a live snapshot - a later download of the same query will differ.
+Caveats measured: specieskey is opaque (matches no backbone key, 0 of 12,310), species
+names are GBIF-normalised (several download names collapse onto one WFO record),
+countrycode='NL' does not mean the coordinate is in the NL (1.07 M records fall in
+Belgium/Germany), 1.99 M records have no coordinates, and there is no GADM level-3 area
+for ~1 in 4 NL subdivisions that hold records.
+
+GADM 4.1 administrative boundaries
+https://geodata.ucdavis.edu/gadm/gadm4.1/json/ - gadm41_NLD_1.json (provinces) and
+gadm41_NLD_2.json (355 municipal areas incl. the IJsselmeer), free for non-commercial use.
+A gadm41_NLD_3.json does not exist: the GeoJSON distribution stops at level 2 for the
+Netherlands.
+
 Plants For A Future (PFAF) Data
 An unofficial SQLite snapshot scraped from the PFAF website. The data and images are subject to PFAF’s copyright terms.
 https://github.com/saulshanabrook/pfaf-data

@@ -1,7 +1,7 @@
 """
 Ask the plant index questions from Python.
 
-    from plant_query import books, plants, origin, nl_status
+    from plant_query import books, plants, origin, nl_status, observations
 
     books("Typha latifolia")                     every BHL title mentioning it
     books("Typha latifolia", dutch=True)         only the Dutch ones
@@ -10,6 +10,10 @@ Ask the plant index questions from Python.
     origin("Quercus robur")                      where it is from, and where it got to
     nl_status("Heracleum mantegazzianum")        native / alien / invasive in the Netherlands
     nl_status(status="invasive")                 every invasive alien species in the NL
+    observations("Heracleum mantegazzianum")     where in the NL it has been recorded
+    observations(area="Zuid-Holland", status="invasive")   a map query in one call
+    obs_totals("Quercus robur")                  its NL extent + totals in one row
+    areas("amst")                                municipalities/provinces by name
 
 Everything is read-only: the database is opened with read_only=True, so this never
 fights a running build (and works while one runs, as long as no other writer holds it).
@@ -209,6 +213,174 @@ def nl_status(needle=None, status=None, limit=None, con=None):
             con.close()
 
 
+def _match_key(con, needle):
+    """
+    SQL condition for a derived table keyed on `key` + `gbif_name` (the observation
+    tables): the canonical WFO id when the plant has one, else the GBIF-normalised name.
+
+    GBIF's normalised spelling is searched even when plant_index does not know the name
+    (GBIF writes 'Amelanchier lamarckii', the WFO backbone 'Amelanchier × lamarckii', and
+    holds 1,816 names - mostly algae - the plant backbone has no record of at all). A
+    name in neither place still raises, with the closest index names as the hint.
+    """
+    n = str(needle).strip()
+    id_like = n.lower().startswith("wfo-") or n.isdigit()
+    hint = ""
+    try:
+        names = _where_name(con, needle)
+    except LookupError as e:
+        # a name plant_index does not know is still worth asking for: GBIF spells some
+        # names its own way, and holds others (algae, nothohybrids) the WFO backbone
+        # has no record of. An id that resolves to nothing is a real miss: raise.
+        if id_like:
+            raise
+        names, hint = [norm(n)], str(e)
+    conds = [f"key IN ({', '.join('?' for _ in names)})",
+             f"gbif_name IN ({', '.join('?' for _ in names)})"]
+    params = names + names
+    if id_like:
+        # the tables store the canonical (accepted) WFO id in `wfo_id`, and plant_index
+        # resolves any id - including a GBIF/NCBI/WCVP one - to the same names
+        cols = " OR ".join(f"cast({c} as VARCHAR) = ?" for c in ID_COLUMNS)
+        ids = [r[0] for r in con.execute(
+            f"SELECT DISTINCT coalesce(accepted_wfo_id, wfo_id) FROM plant_index "
+            f"WHERE {cols} AND coalesce(accepted_wfo_id, wfo_id) IS NOT NULL",
+            [n] * len(ID_COLUMNS)).fetchall()]
+        if ids:
+            conds.append(f"wfo_id IN ({', '.join('?' for _ in ids)})")
+            params += ids
+    else:
+        conds.append(f"{NORM.format(c='name')} = ?")
+        params.append(norm(n))
+    if hint:
+        # the GBIF-spelling fallback earned its keep only if it finds something
+        cond, p = "(" + " OR ".join(conds) + ")", params
+        if not con.execute(f"SELECT count(*) FROM observations_nl WHERE {cond}",
+                           p).fetchall()[0][0]:
+            raise LookupError(hint)
+    return "(" + " OR ".join(conds) + ")", params
+
+
+def areas(needle=None, con=None):
+    """
+    The areas an observation can be found in: GADM id, Dutch name, province, whether it
+    is really in the Netherlands, centroid (lat/lng) and bounding box, plus how many
+    plants and records were counted there.
+
+    needle filters on area name or province (case-insensitive substring): areas("wal")
+    finds Walcheren, 's-Gravenwoude, ... Needs build_obs.py.
+    """
+    own = con is None
+    con = con or connect()
+    try:
+        table = _table(con, "obs_areas")
+        if not table:
+            raise LookupError("no obs_areas table - run build_obs.py first")
+        sql, params = f"SELECT * FROM {table}", []
+        if needle:
+            sql += " WHERE lower(name) LIKE ? OR lower(province) LIKE ?"
+            params = [f"%{str(needle).lower()}%"] * 2
+        return con.execute(sql + " ORDER BY name", params).fetchdf()
+    finally:
+        if own:
+            con.close()
+
+
+def observations(needle=None, area=None, dutch=True, status=None, limit=None, con=None):
+    """
+    Where in the Netherlands has this plant been recorded? One row per plant x area
+    (GADM level 2: the 352 municipalities, plus the IJsselmeer and two other water areas),
+    with the number of GBIF records there and the first/last year seen.
+
+    area='Wageningen'   one municipality or province (case-insensitive, matches either)
+    status='invasive'   only plants with that nl_status verdict - the answer to "map the
+                        invasive aliens of Zuid-Holland" in one call
+    dutch=True          only records GBIF placed inside the Netherlands (the default:
+                       1.07 M 'Netherlands' records sit in Belgian Limburg or on the
+                       German border, mostly poorly georeferenced herbarium slips, and
+                       1.99 M have no coordinates at all and appear as area=None)
+    needle=None         every plant: combine with area to ask "what grows in ...?"
+
+    Columns: key, name, author, rank, family, gbif_name, wfo_id, link_src, area_id,
+    area_name, province, in_nl, occurrences, first_year, last_year. Needs build_obs.py.
+    """
+    own = con is None
+    con = con or connect()
+    try:
+        table = _table(con, "observations_nl")
+        if not table:
+            raise LookupError("no observations_nl table - run build_obs.py first")
+        sql, params = f"SELECT * FROM {table}", []
+        clauses = []
+        if needle is not None:
+            cond, p = _match_key(con, needle)
+            clauses.append(cond)
+            params += p
+        if area:
+            clauses.append("(lower(area_name) LIKE ? OR lower(province) LIKE ?)")
+            params += [f"%{str(area).lower()}%"] * 2
+        if dutch:
+            clauses.append("in_nl")
+        if status:
+            if not _table(con, "nl_status"):
+                raise LookupError("no nl_status table - run build_status.py first")
+            sql = (f"SELECT o.*, s.status nl_status, s.arrival_year, s.conflict "
+                   f"FROM {table} o JOIN nl_status s USING (wfo_id)")
+            clauses.append("s.status = ?")
+            params.append(status)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY occurrences DESC, name"
+        if limit:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return con.execute(sql, params).fetchdf()
+    finally:
+        if own:
+            con.close()
+
+
+def obs_totals(needle=None, status=None, limit=None, con=None):
+    """
+    One row per plant: how many Dutch municipalities it was found in, total records,
+    first/last year, and the bounding box of its records (a quick map extent without
+    touching the point data). Also how many records could not be placed (no coordinates)
+    or fell outside the Netherlands.
+
+    needle=None gives every plant GBIF knows for the Netherlands (12,106); `status`
+    narrows it to an nl_status verdict. Needs build_obs.py.
+    """
+    own = con is None
+    con = con or connect()
+    try:
+        table = _table(con, "nl_totals")
+        if not table:
+            raise LookupError("no nl_totals table - run build_obs.py first")
+        sql, params = f"SELECT * FROM {table}", []
+        clauses = []
+        if needle is not None:
+            cond, p = _match_key(con, needle)
+            clauses.append(cond)
+            params += p
+        if status:
+            if not _table(con, "nl_status"):
+                raise LookupError("no nl_status table - run build_status.py first")
+            sql = (f"SELECT t.*, s.status nl_status, s.arrival_year "
+                   f"FROM {table} t JOIN nl_status s USING (wfo_id)")
+            clauses.append("s.status = ?")
+            params.append(status)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY occurrences_nl DESC NULLS LAST, name"
+        if limit:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return con.execute(sql, params).fetchdf()
+    finally:
+        if own:
+            con.close()
+
+
 def books(needle, dutch=None, limit=100, con=None):
     """
     BHL titles mentioning a plant, most-mentioned first.
@@ -264,6 +436,9 @@ if __name__ == "__main__":
     print(origin(arg).to_string(index=False))
     print()
     print(nl_status(arg).to_string(index=False))
+    print()
+    print(observations(arg, limit=5)[["name", "area_name", "province", "occurrences",
+                                      "first_year", "last_year"]].to_string(index=False))
     print()
     print(books(arg, limit=10)[["full_title", "language_code", "published_place", "dutch",
                                 "pages", "first_year", "last_year"]].to_string(index=False))

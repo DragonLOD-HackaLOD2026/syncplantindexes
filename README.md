@@ -35,7 +35,13 @@ already done, and no download or conversion is ever repeated unless you delete i
                                                          Dutch flags (language / imprint)
 
  plant_query.py ── read-only Python questions over all of it:
-                   plants(), books(), origin(), nl_status()
+                   plants(), books(), origin(), nl_status(), observations()
+
+ GBIF NL download ┐
+ (GROUP BY on     ├─► build_obs.py ──► observations_nl  one row per plant × municipality:
+ GBIF's server)   │     (DuckDB + Parquet) record counts, first/last year
+ + GADM borders   └──►  obs_areas + nl_totals  area centroids/bboxes for maps,
+                                               totals per plant
 
  ranges ─────────┐
  plant_index    ─┼─► build_status.py ──► taxon_ranges   one row per taxon: how much of the
@@ -61,6 +67,9 @@ Wikidata columns exist but stay empty. Nothing else in the pipeline needs them.<
 | `plant_data/taxon_ranges.parquet` | `taxon_ranges`: native / introduced range per taxon (TDWG regions, from WCVP) |
 | `plant_data/nl_status.parquet` | `nl_status`: one row per taxon recorded in the Netherlands — resolved status plus each source's verdict and arrival year |
 | `plant_data/tdwg_regions.parquet` | `tdwg_regions`: TDWG level-3 code → name, its level-2 region and continent |
+| `plant_data/observations_nl.parquet` | `observations_nl`: one row per plant × Dutch municipality — GBIF record counts, first/last year seen (33.6 M records compressed into 529 K rows) |
+| `plant_data/obs_areas.parquet` | `obs_areas`: one row per area — GADM id, Dutch name, province, centroid + bounding box (what a choropleth needs, no geometry required) |
+| `plant_data/nl_totals.parquet` | `nl_totals`: one row per plant — how many of the 355 Dutch areas it was found in, total records, its bounding box in the NL |
 | `plant_data/quality_report.md` | The `status.py` scorecard: what is loaded, coverage per id, broken links, and how to fix each gap |
 | `plant_data/bhl/*.parquet` | The slim BHL tables (only the columns needed) |
 
@@ -119,6 +128,27 @@ alone misses most of them, and the Latin imprint forms are what find them. Antwe
   **Antarctica** in TDWG3, and `ILIKE '%netherlands%'` silently adds 1,068 Netherlands
   Antilles rows.
 
+**Where each plant was actually recorded in the Netherlands** (`gbif_nl.py` + `build_obs.py`):
+
+- GBIF holds 33.6 M plant records for the Netherlands. Downloading the points would take
+  gigabytes, so `gbif_nl.py` asks GBIF's SQL API to do the `GROUP BY species × GADM area`
+  on **GBIF's own server**: the whole country arrives as 538 K rows / 38 MB, and
+  `build_obs.py` turns that into `observations_nl` — one row per plant × municipality
+  (529 K rows, 12,106 plants × 355 Dutch areas — 352 municipalities plus the IJsselmeer
+  and two other water areas), with `obs_areas` holding each area's centroid and bounding
+  box for maps.
+- **Level 2 (municipalties), not level 3 (wards)**, deliberately: GBIF has no level-3 area
+  for roughly 1 in 4 NL subdivisions that hold records, GADM 4.1's GeoJSON has no
+  `gadm41_NLD_3` file at all, and level 3 would roughly triple the table for little gain.
+- GBIF's SQL API returns an opaque `specieskey` that matches **no** GBIF backbone key in
+  the index (measured: 0 of 12,310), so linking runs through **names**: 10,290 of 12,106
+  names (85%) resolve to a WFO record, the rest are mostly algae and nothohybrids the
+  plant backbone does not hold — they keep their own name as key instead of disappearing.
+- Points whose **coordinate** falls outside the Netherlands (1.07 M records in Belgian
+  Limburg and along the German border — publishers said `countrycode = NL`, georeferencing
+  did not agree) and points digitised **without coordinates** (1.99 M, mostly coastal and
+  dune plants) are kept and flagged (`in_nl`, `area_id IS NULL`), never silently dropped.
+
 `seed/` holds hand-curated reference tables that the scripts read (committed on purpose,
 unlike the gitignored `plant_data/`); `seed/README.md` explains each one.
 
@@ -133,8 +163,10 @@ unlike the gitignored `plant_data/`); `seed/README.md` explains each one.
 | `build_ranges.py` | Stacks the four distribution sources into one long `ranges` table linked back to `plant_index` — by WCVP id, else name+author, else name+author ignoring the parenthetical author, else unique exact name (`link_src` says which). Skips SInAS/GRIIS with a message while their files are missing | seconds to minutes; rebuilt from scratch on every run |
 | `build_books.py` | Folds the 217 M BHL name-page rows into `plant_books`, one row per plant name × title, with the Dutch language/imprint flags from `seed/nl_places.csv` | ~3 min, staged temp tables so each step can spill to disk |
 | `build_status.py` | Turns `ranges` into answers: `taxon_ranges` (native / introduced range per taxon), `nl_status` (what each source says about the Netherlands, plus one resolved verdict) and the `tdwg_regions` gazetteer | ~3 s, reads `seed/nl_regions.csv` |
+| `gbif_nl.py` | Asks GBIF's SQL download API for all plant occurrences in the Netherlands **grouped by species × GADM area** — the GROUP BY runs on GBIF's server, so the whole country comes back as 538 K rows / 38 MB instead of tens of millions of points. Needs a GBIF login; prints the DOI to cite | ~5–10 min on GBIF's side, 38 MB |
+| `build_obs.py` | Folds that download into `observations_nl` (plant × municipality), `obs_areas` (names, centroids, bboxes from the GADM GeoJSON) and `nl_totals`; links GBIF names to `plant_index` by name | ~2 s |
 | `status.py` | **Quality check**: prints a scorecard of every source file, table, id coverage, and cross-reference (and writes `plant_data/quality_report.md`). Read-only, so run it as often as you like; exit code 1 means something failed | seconds |
-| `plant_query.py` | The questions as Python functions: `plants(name_or_id)`, `books(name, dutch=…)`, `origin(name)`, `nl_status(name, status=…)`. Read-only, resolves names and ids, suggests close names on a typo | about a second per question |
+| `plant_query.py` | The questions as Python functions: `plants(name_or_id)`, `books(name, dutch=…)`, `origin(name)`, `nl_status(name, status=…)`, `observations(name, area=…, status=…)`, `obs_totals()`, `areas()`. Read-only, resolves names and ids, suggests close names on a typo | about a second per question |
 
 ```bash
 python download.py        # one-time data setup
@@ -144,6 +176,8 @@ python bhl_build.py       # literature counts
 python build_ranges.py    # native / introduced / invasive per region
 python build_books.py     # which books mention which plant (and which are Dutch)
 python build_status.py    # origin + native/alien/invasive in the Netherlands
+python gbif_nl.py --admin 2   # where each plant was recorded in the NL (asks for a login)
+python build_obs.py       # plant × municipality record counts + areas for maps
 python status.py          # what is in there, and did it join well?
 ```
 
@@ -169,6 +203,8 @@ python status.py          # what is in there, and did it join well?
 | GloNAF 2.02 | manual download into `plant_data/glonaf/` (`glonaf_flora2`, `glonaf_taxon_wcvp`, `glonaf_region` are the three files used) |
 | SInAS 3.2 | `SInAS_3.2.csv` into `plant_data/sinas/` — [Zenodo 21933976](https://zenodo.org/records/21933976); **space-delimited** despite the `.csv` name, and it covers every kingdom, so only rows whose name is in `plant_index` are kept |
 | GRIIS Netherlands | Darwin Core Archive zip into `plant_data/griis/` — [cloud.gbif.org/griis/resource?r=griis-nl](https://cloud.gbif.org/griis/resource?r=griis-nl), unpacked once by `build_ranges.py` |
+| GBIF occurrences (NL) | `python gbif_nl.py --admin 2` — GBIF's SQL download API (`api.gbif.org/v1/occurrence/download/request/0018549-...`), species × GADM area aggregated **server-side**. Needs a GBIF login; it prints a DOI on completion — ours is [10.15468/dl.jzdpzg](https://doi.org/10.15468/dl.jzdpzg), 12,310 names × 426 areas, 33,601,025 records, 1510–2026 |
+| GADM 4.1 boundaries | free: `gadm41_NLD_{1,2}.json` from [geodata.ucdavis.edu](https://geodata.ucdavis.edu/gadm/gadm4.1/json/) into `plant_data/gadm/`. Level 2 = the 355 municipal areas; a level-3 file does not exist for the Netherlands |
 | IPNI ids | extracted from WFO's `scientificNameID` LSIDs — no separate download |
 | Dutch imprint places | hand-curated `seed/nl_places.csv` — no source lists where a book was printed, so this list *is* the curation |
 | Netherlands region codes | hand-curated `seed/nl_regions.csv` — which code means "the Netherlands" in each source's scheme, and the codes (`NLA`/`ANT`/`CUW`/`SUR`) that must stay out |
@@ -204,6 +240,11 @@ books("Quercus roburr")                      # LookupError: closest is Quercus r
 origin("Quercus robur")                      # native in 41 TDWG regions, introduced in 19
 nl_status("Heracleum mantegazzianum")        # invasive in NL, arrived 1900, 4 sources agree
 nl_status(status="invasive")                 # the whole Dutch invasive list: 116 taxa
+observations("Heracleum mantegazzianum")     # every municipality it is recorded in + counts
+observations(area="Zuid-Holland", status="invasive")  # invasives in one province
+observations("Amelanchier lamarckii")        # GBIF-only names work too (no WFO record)
+obs_totals("Quercus robur")                  # 353 areas, 185,697 records, its NL extent
+areas("amst")                                # find an area: Amsterdam + Amstelveen + ...
 ```
 
 Or straight SQL (open the DB read-only, or use the Parquet files):
@@ -261,6 +302,23 @@ ORDER BY pages DESC;
 -- the best-documented plants in Dutch books
 SELECT nname, count(DISTINCT title_id) AS dutch_titles, sum(pages) AS pages
 FROM plant_books WHERE dutch <> '' GROUP BY 1 ORDER BY dutch_titles DESC LIMIT 10;
+
+-- where in the Netherlands has this plant been recorded, and how often?
+SELECT area_name, province, occurrences, first_year, last_year
+FROM observations_nl WHERE lower(name) = 'heracleum mantegazzianum' AND in_nl
+ORDER BY occurrences DESC;
+
+-- the invasives observed in one province, joined to their NL status and arrival year
+SELECT o.name, a.name AS municipality, o.occurrences, s.status, s.arrival_year
+FROM observations_nl o JOIN obs_areas a ON a.id = o.area_id
+LEFT JOIN nl_status s ON s.key = o.key
+WHERE a.province = 'Zuid-Holland' AND s.status = 'invasive'
+ORDER BY o.occurrences DESC LIMIT 20;
+
+-- for a map: record counts per municipality with the centroid to place a label on
+SELECT a.id, a.name, a.lat, a.lng, sum(o.occurrences) AS records
+FROM observations_nl o JOIN obs_areas a ON a.id = o.area_id
+WHERE o.in_nl GROUP BY 1, 2, 3, 4 ORDER BY records DESC LIMIT 10;
 ```
 
 ## Re-running, redoing, resetting
@@ -286,5 +344,8 @@ not a bug to fix — `status.py` reports Wikidata as `parked`, never as a gap.
 - WFO `classification.csv` contains a few invalid UTF-8 bytes and unbalanced quotes — `build_index.py` cleans a copy once (`wfo_clean.tsv`) rather than dropping rows.
 - GBIF moved its backbone to the Catalogue of Life XR in 2026. Our GBIF ids come from the backbone archive, never from Wikidata (parked), so the P846 re-key question does not apply here — but `status.py` still checks that every `gbif_id` in the index actually exists in the `gbif` table.
 - Filtering distributions for the Netherlands must use **region codes**: `region_code = 'NET'` for WCVP (TDWG level 3) and `'NLD'` for GloNAF. `ILIKE '%netherlands%'` also returns *Netherlands Antilles* (`NLA` / `ANT`).
+- GBIF's SQL download API returns an opaque `specieskey` (`4MDK3`) that has nothing to do with GBIF backbone keys — 0 of 12,310 match `plant_index.gbif_id`. Observation tables link to the index **by name**.
+- GBIF normalises its species names, so `quercus robur` and `quercus hispanica` in a download are records of one accepted WFO record; observations must be grouped by `(plant, area)`, not by the download's name, or a municipality gets two rows for one plant.
+- `countrycode = 'NL'` on a GBIF record means the *publisher* said Netherlands — 1.07 M of those coordinates actually fall in Belgium or Germany, and 1.99 M records have no coordinates at all. `in_nl` / `area_id IS NULL` flag both.
 - WorldFlora's built-in download URL is dead — that's why the WFO backbone comes from Zenodo.
 - ETE and rWCVPdata only download/build when their output is missing; later uses of `taxa.sqlite` should pass `update=False`.

@@ -62,9 +62,12 @@ FILES = [
      "build_ranges.py (#3)"),
     ("GRIIS Netherlands", ["griis/*.zip"], "wanted",
      "checklist from cloud.gbif.org/griis/resource?r=griis-nl into plant_data/griis/ (#3)"),
-    ("GBIF occurrences (NL)", ["occurrences_nl.parquet", "observations_nl.parquet"], "later",
-     "build_obs.py, not written yet (#7)"),
-    ("GADM Netherlands", ["gadm"], "later", "not downloaded yet (#8)"),
+    ("GBIF NL download (#7)", ["gbif_nl"], "wanted",
+     "python gbif_nl.py --admin 2 (asks for a GBIF login; GROUP BY runs on GBIF's side; "
+     "cite the DOI it prints), then build_obs.py"),
+    ("GADM Netherlands (#8)", ["gadm/gadm41_NLD_2.json"], "wanted",
+     "GADM 4.1 boundaries from geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_NLD_2.json "
+     "into plant_data/gadm/ (level 3 does not exist for the Netherlands)"),
     ("plant_index.parquet", ["plant_index.parquet"], "wanted", "run build_index.py"),
     ("ranges.parquet", ["ranges.parquet"], "wanted", "run build_ranges.py"),
     ("plant_index_bhl.parquet", ["plant_index_bhl.parquet"], "wanted", "run bhl_build.py"),
@@ -72,6 +75,9 @@ FILES = [
     ("taxon_ranges.parquet", ["taxon_ranges.parquet"], "wanted", "run build_status.py (#5)"),
     ("nl_status.parquet", ["nl_status.parquet"], "wanted", "run build_status.py (#5)"),
     ("tdwg_regions.parquet", ["tdwg_regions.parquet"], "wanted", "run build_status.py (#5)"),
+    ("observations_nl.parquet", ["observations_nl.parquet"], "wanted", "run build_obs.py (#7)"),
+    ("obs_areas.parquet", ["obs_areas.parquet"], "wanted", "run build_obs.py (#7)"),
+    ("nl_totals.parquet", ["nl_totals.parquet"], "wanted", "run build_obs.py (#7)"),
     ("seed/nl_regions.csv", ["../seed/nl_regions.csv"], "wanted",
      "curated Netherlands region codes per scheme, committed in seed/ - build_status.py "
      "and status.py both read it (#5)"),
@@ -100,6 +106,10 @@ TABLES = [
     ("taxon_ranges", "native / introduced range per taxon (#5)", "wanted"),
     ("nl_status", "one row per taxon recorded in the Netherlands (#5)", "wanted"),
     ("tdwg_regions", "TDWG region code -> name gazetteer (#5)", "wanted"),
+    ("observations_nl", "plant x municipality record counts (#7)", "wanted"),
+    ("obs_areas", "municipality centroids + bounding boxes (#8)", "wanted"),
+    ("nl_totals", "one row per plant: how much of the NL it is found in (#7)", "wanted"),
+    ("observations_nl_full", "observations_nl + area centroids, for maps (#8)", "wanted"),
     ("wikidata_ids", "parked (issue #2)", "parked"),
     ("wikidata_common_names", "parked (issue #2)", "parked"),
 ]
@@ -506,6 +516,72 @@ def check_status(con):
     return out
 
 
+def check_obs(con):
+    """observations_nl / obs_areas / nl_totals: where plants were seen in the NL (#7 #8)."""
+    if not has_table(con, "observations_nl"):
+        return [("warn", "observations_nl", None,
+                 "not built -> run gbif_nl.py (the GBIF download) then build_obs.py")]
+    out = []
+    rows, taxa, nl_areas = con.execute("""SELECT count(*), count(DISTINCT key),
+        count(DISTINCT CASE WHEN in_nl THEN area_id END) FROM observations_nl""").fetchone()
+    out.append(("ok", "observations_nl", rows,
+                f"{human(taxa)} plants seen in {nl_areas} Dutch areas (GADM level 2: the "
+                "municipalities plus the IJsselmeer and two other water areas)"))
+    dup = one(con, "SELECT count(*) FROM (SELECT key, coalesce(area_id, '') FROM "
+                   "observations_nl GROUP BY 1, 2 HAVING count(*) > 1)", default=0)
+    out.append(("ok" if not dup else "fail", "one row per plant x area", dup,
+                "duplicate (plant, area) rows - must be 0"))
+    # no record may be lost or invented on the way in: the download's totals must add up
+    total = one(con, "SELECT sum(occurrences) FROM observations_nl", default=0)
+    inside = one(con, "SELECT sum(CASE WHEN in_nl THEN occurrences END) FROM observations_nl",
+                 default=0)
+    outside = one(con, "SELECT sum(CASE WHEN NOT in_nl THEN occurrences END) "
+                       "FROM observations_nl", default=0)
+    nocoord = one(con, "SELECT sum(CASE WHEN area_id IS NULL THEN occurrences END) "
+                       "FROM observations_nl", default=0)
+    out.append(("ok" if inside + outside + nocoord == total else "fail",
+                "records add up", total,
+                f"{human(inside)} inside the Netherlands + {human(outside)} whose coordinate "
+                "lands in Belgium/Germany (border slips and GBIF's default centroid for "
+                f"badly georeferenced labels) + {human(nocoord)} digitised without any "
+                "coordinates - kept and flagged, never dropped"))
+    raw = list(DATA.glob("gbif_nl/*.csv"))
+    if raw:
+        newest = max(raw, key=lambda p: p.stat().st_size)
+        download = one(con, f"SELECT sum(cast(occurrences AS BIGINT)) FROM read_csv "
+                            f"('{newest}', header=true, sep='\t')", default=0)
+        out.append(("ok" if download == total else "fail", "matches GBIF download", download,
+                    f"sum(occurrences) in {newest.name} - every record of the download is "
+                    "in observations_nl"))
+    linked = one(con, "SELECT count(DISTINCT key) FILTER (WHERE wfo_id IS NOT NULL) "
+                      "FROM observations_nl", default=0)
+    out.append(("ok", "linked to plant_index", linked,
+                f"{pct(linked, taxa)} of the {human(taxa)} GBIF names resolve to a WFO "
+                "record by name (GBIF's SQL specieskey matches no id in the index: 0 of "
+                "12,310). The rest are mostly algae and nothohybrids the plant backbone "
+                "does not hold; they keep their own name as key"))
+    if has_table(con, "obs_areas"):
+        areas, innl, nofix = con.execute("""SELECT count(*), count(*) FILTER (WHERE in_nl),
+            count(*) FILTER (WHERE in_nl AND lat IS NULL) FROM obs_areas""").fetchone()
+        out.append(("ok" if not nofix else "fail", "obs_areas", areas,
+                    f"{innl} Dutch + {areas - innl} foreign areas GBIF placed NL records in; "
+                    "each Dutch one has a centroid + bbox for mapping "
+                    f"({nofix} missing coordinates)"))
+        named = one(con, "SELECT count(*) FROM obs_areas WHERE name IS NULL", default=0)
+        out.append(("ok" if not named else "warn", "area names", named,
+                    "areas without a name - must be 0 for the maps to be readable"))
+    if has_table(con, "nl_totals"):
+        t_rows, t_taxa = con.execute("SELECT count(*), count(DISTINCT key) FROM nl_totals")\
+                          .fetchone()
+        out.append(("ok" if t_rows == t_taxa == taxa else "fail", "nl_totals", t_rows,
+                    "one row per plant, matching observations_nl"))
+    out.append(("ok", "level 3 (wards)", 0,
+                "deliberately not built (issue #8): GBIF has no level-3 area for about 1 in "
+                "4 NL subdivisions holding records, GADM 4.1's GeoJSON has no gadm41_NLD_3 "
+                "file at all, and the agreed answer was to keep the database small"))
+    return out
+
+
 def check_matching(con):
     """How much of the index can be matched by name alone - drives every fallback."""
     if not has_table(con, "plant_index"):
@@ -542,6 +618,7 @@ SECTIONS = [
     ("BHL literature", check_bhl),
     ("Books per plant (#4)", check_books),
     ("Origin and Netherlands status (#5)", check_status),
+    ("Observations in the Netherlands (#7 #8)", check_obs),
     ("Matching notes", check_matching),
     ("Parked - decided against, not bugs", check_parked),
 ]
