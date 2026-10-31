@@ -1,12 +1,15 @@
 """
 Ask the plant index questions from Python.
 
-    from plant_query import books, plants
+    from plant_query import books, plants, origin, nl_status
 
     books("Typha latifolia")                     every BHL title mentioning it
     books("Typha latifolia", dutch=True)         only the Dutch ones
     books("Quercus robur", dutch="published")    printed in the Netherlands
     plants("Typha")                              what the index knows, by name or id
+    origin("Quercus robur")                      where it is from, and where it got to
+    nl_status("Heracleum mantegazzianum")        native / alien / invasive in the Netherlands
+    nl_status(status="invasive")                 every invasive alien species in the NL
 
 Everything is read-only: the database is opened with read_only=True, so this never
 fights a running build (and works while one runs, as long as no other writer holds it).
@@ -100,6 +103,112 @@ def plants(needle, con=None):
             con.close()
 
 
+def _match(con, needle, id_column="wfo_id"):
+    """
+    SQL condition + params selecting one plant's rows in a derived table.
+
+    Matches both spellings of an identity: the normalised name (so a plant the range
+    sources never linked to a WFO id is still reachable) and every WFO id that name has
+    in plant_index (so a homonym does not drag in a different plant with the same name).
+    """
+    names = _where_name(con, needle)
+    conds = [f"{NORM.format(c='name')} IN ({', '.join('?' for _ in names)})"]
+    params = list(names)
+    # the derived tables key on the *accepted* WFO record (build_status canonicalises
+    # synonym ids), so ask with accepted ids: an id needle that happens to be a synonym
+    # still finds its plant
+    ids = [r[0] for r in con.execute(
+        f"SELECT DISTINCT coalesce(accepted_wfo_id, wfo_id) FROM plant_index "
+        f"WHERE {NORM.format(c='name')} IN ({', '.join('?' for _ in names)})", names
+    ).fetchall() if r[0]]
+    if ids:
+        conds.append(f"{id_column} IN ({', '.join('?' for _ in ids)})")
+        params += ids
+    return "(" + " OR ".join(conds) + ")", params
+
+
+def origin(needle, con=None):
+    """
+    Where a plant is from: its native range, and how far it has travelled.
+
+    Returns one row per plant_index match (homonyms give several): wfo_id, name, author,
+    rank, family, n_native_regions, native_regions, native_groups, n_introduced_regions,
+    n_regions_total, sources.
+
+    `native_regions` is the TDWG region names when the range is small enough to read
+    (up to 12); past that the same information is summarised as `native_groups`, its
+    TDWG level-2 regions. Counts are TDWG regions from WCVP, the only source with global
+    coverage. Needs build_status.py.
+    """
+    own = con is None
+    con = con or connect()
+    try:
+        table = _table(con, "taxon_ranges")
+        if not table:
+            raise LookupError("no taxon_ranges table - run build_status.py first")
+        cond, params = _match(con, needle)
+        return con.execute(f"""
+            SELECT wfo_id, name, author, rank, family, n_native_regions, native_regions,
+                   native_groups, n_introduced_regions, n_regions_total, sources
+            FROM {table} WHERE {cond}
+            ORDER BY name, author""", params).fetchdf()
+    finally:
+        if own:
+            con.close()
+
+
+def nl_status(needle=None, status=None, limit=None, con=None):
+    """
+    Is it native here, or an alien that arrived - and is it invasive?
+
+    needle=None       every taxon any source records for the Netherlands (4,806 of them)
+    status='native' / 'alien' / 'invasive' / 'naturalized' / 'introduced'
+                      'alien' means anything not called native: the answer to "is this
+                      species alien in the Netherlands?" for a whole list at once.
+
+    Returns wfo_id, name, author, rank, status, status_source, conflict, one column per
+    source (wcvp_status, glonaf_status, sinas_status, griis_status), n_sources,
+    n_sources_native, n_sources_alien, invasive, extinct, arrival_year, arrival_source.
+
+    `status` is the resolved answer (GRIIS > SInAS > GloNAF > WCVP, and any source that
+    says invasive wins); the four source columns stay so the disagreement is visible,
+    and `conflict` marks the 88 taxa where sources differ. `arrival_year` comes from
+    SInAS - GRIIS-NL has almost no dates. An empty frame means no source records this
+    plant in the Netherlands, which for a garden escape is itself the answer. Needs
+    build_status.py.
+    """
+    own = con is None
+    con = con or connect()
+    try:
+        table = _table(con, "nl_status")
+        if not table:
+            raise LookupError("no nl_status table - run build_status.py first")
+        sql, params = f"SELECT * FROM {table}", []
+        clauses = []
+        if needle is not None:
+            cond, params = _match(con, needle)
+            clauses.append(cond)
+        if status:
+            if status == "alien":
+                clauses.append("status <> 'native'")
+            elif status in ("native", "invasive", "naturalized", "introduced"):
+                clauses.append("status = ?")
+                params.append(status)
+            else:
+                raise ValueError("status must be native, alien, invasive, naturalized "
+                                 "or introduced")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY name, author"
+        if limit:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return con.execute(sql, params).fetchdf()
+    finally:
+        if own:
+            con.close()
+
+
 def books(needle, dutch=None, limit=100, con=None):
     """
     BHL titles mentioning a plant, most-mentioned first.
@@ -151,6 +260,10 @@ if __name__ == "__main__":
     import sys
     arg = sys.argv[1] if len(sys.argv) > 1 else "Typha latifolia"
     print(plants(arg).to_string(index=False))
+    print()
+    print(origin(arg).to_string(index=False))
+    print()
+    print(nl_status(arg).to_string(index=False))
     print()
     print(books(arg, limit=10)[["full_title", "language_code", "published_place", "dutch",
                                 "pages", "first_year", "last_year"]].to_string(index=False))

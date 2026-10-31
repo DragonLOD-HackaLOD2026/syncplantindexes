@@ -15,6 +15,7 @@ Four verdicts:
 
 Exit code is 1 if anything FAILed.
 """
+import csv
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +69,12 @@ FILES = [
     ("ranges.parquet", ["ranges.parquet"], "wanted", "run build_ranges.py"),
     ("plant_index_bhl.parquet", ["plant_index_bhl.parquet"], "wanted", "run bhl_build.py"),
     ("plant_books.parquet", ["plant_books.parquet"], "wanted", "run build_books.py (#4)"),
+    ("taxon_ranges.parquet", ["taxon_ranges.parquet"], "wanted", "run build_status.py (#5)"),
+    ("nl_status.parquet", ["nl_status.parquet"], "wanted", "run build_status.py (#5)"),
+    ("tdwg_regions.parquet", ["tdwg_regions.parquet"], "wanted", "run build_status.py (#5)"),
+    ("seed/nl_regions.csv", ["../seed/nl_regions.csv"], "wanted",
+     "curated Netherlands region codes per scheme, committed in seed/ - build_status.py "
+     "and status.py both read it (#5)"),
     ("seed/nl_places.csv", ["../seed/nl_places.csv"], "wanted",
      "curated Dutch imprint places, committed in seed/ - build_books.py needs it (#4)"),
 ]
@@ -90,6 +97,9 @@ TABLES = [
     ("plant_index_bhl", "index + literature counts", "wanted"),
     ("plant_books", "plant name x BHL title (#4)", "wanted"),
     ("plant_books_full", "plant_books + title/copy text", "wanted"),
+    ("taxon_ranges", "native / introduced range per taxon (#5)", "wanted"),
+    ("nl_status", "one row per taxon recorded in the Netherlands (#5)", "wanted"),
+    ("tdwg_regions", "TDWG region code -> name gazetteer (#5)", "wanted"),
     ("wikidata_ids", "parked (issue #2)", "parked"),
     ("wikidata_common_names", "parked (issue #2)", "parked"),
 ]
@@ -130,6 +140,28 @@ def human(v):
 
 def pct(part, whole):
     return f"{100.0 * part / whole:.1f}%" if whole else "-"
+
+
+def nl_pairs(include="yes"):
+    """
+    (region_scheme, code) rows from seed/nl_regions.csv.
+
+    "The Netherlands" is a set of codes, one per source's region scheme, and the pair is
+    what matters: ANT is Netherlands Antilles in GloNAF and Antarctica in TDWG3. Keeping
+    the list in one curated file means no query can quietly define it differently.
+    """
+    path = DATA.parent / "seed" / "nl_regions.csv"
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as fh:
+        return [(r["region_scheme"], r["code"]) for r in csv.DictReader(fh)
+                if r["include"].strip().lower() == include]
+
+
+def nl_values(pairs=None):
+    """Those pairs as a SQL VALUES list, for EXISTS (scheme, code) checks."""
+    pairs = pairs if pairs is not None else nl_pairs()
+    return ", ".join(f"('{s}', '{c}')" for s, c in pairs)
 
 
 # --- sections: each returns [(verdict, label, value, note)] -------------------
@@ -282,13 +314,21 @@ def check_ranges(con):
                     ", ".join(f"{s} {human(c)}" for s, c in mix)
                     + " (unlinked WCVP rows are names the WFO backbone does not hold)"))
     # what the Netherlands looks like in each source: the number #5 #6 #7 depend on
-    nl = con.execute("""SELECT source, count(*), count(DISTINCT coalesce(wfo_id, name)) taxa
-        FROM ranges WHERE region_code IN ('NET', 'NLD', 'NL', '184') GROUP BY 1 ORDER BY 1""").fetchall()
-    if nl:
+    pairs = nl_pairs()
+    if pairs:
+        nl = con.execute(f"""SELECT source, count(*), count(DISTINCT coalesce(wfo_id, name)) taxa
+            FROM ranges r WHERE EXISTS (SELECT 1 FROM (VALUES {nl_values(pairs)})
+                                        v(scheme, code)
+            WHERE v.scheme = r.region_scheme AND v.code = r.region_code)
+            GROUP BY 1 ORDER BY 1""").fetchall()
         out.append(("ok", "ranges:Netherlands", None,
                     ", ".join(f"{s} {human(r)} rows/{human(t)} taxa" for s, r, t in nl)
-                    + " (region codes NET/NLD/NL/184 - never ILIKE '%netherlands%', which "
-                      "also returns Netherlands Antilles)"))
+                    + " (region codes " + "/".join(c for _, c in pairs)
+                    + " paired with their scheme - never ILIKE '%netherlands%', which also "
+                      "returns Netherlands Antilles)"))
+    else:
+        out.append(("warn", "seed/nl_regions.csv", None,
+                    "missing -> every Netherlands filter needs its (scheme, code) pairs"))
     # SInAS has a pathway column, but for plants it is empty - matters for #6
     path = one(con, "SELECT count(pathway) FROM ranges", default=0)
     if path == 0 and "sinas" in present:
@@ -395,6 +435,77 @@ def check_books(con):
     return out
 
 
+def check_status(con):
+    """taxon_ranges / nl_status: where a plant is from, what it does in the NL (#5)."""
+    if not has_table(con, "nl_status"):
+        return [("warn", "nl_status", None, "not built -> run build_status.py (#5)")]
+    out = []
+    pairs = nl_pairs()
+    rows = one(con, "SELECT count(*) FROM nl_status", default=0)
+    raw = one(con, f"""SELECT count(*) FROM (SELECT DISTINCT
+                          CASE WHEN r.wfo_id IS NOT NULL THEN r.wfo_id ELSE {norm('r.name')} END k
+                      FROM ranges r WHERE EXISTS (SELECT 1 FROM (VALUES {nl_values(pairs)})
+                          v(scheme, code) WHERE v.scheme = r.region_scheme
+                          AND v.code = r.region_code))""", default=0)
+    out.append(("ok", "nl_status", rows,
+                f"taxa recorded in the Netherlands from {human(raw)} raw id/name spellings "
+                f"in ranges - a WFO synonym id, the accepted id and a bare name are one plant"))
+    dup = one(con, "SELECT count(*) FROM (SELECT key FROM nl_status GROUP BY 1 HAVING count(*) > 1)",
+              default=0)
+    out.append(("ok" if not dup else "fail", "nl_status key", dup,
+                "duplicate taxon rows - must be 0"))
+    # every answer word must come from the sources' own vocabulary
+    known = {"native", "introduced", "naturalized", "invasive", "cryptogenic", "uncertain"}
+    used = {w.strip() for (s,) in con.execute("SELECT DISTINCT status FROM nl_status").fetchall()
+            for w in str(s).replace("|", ";").split(";")}
+    if used - known:
+        out.append(("fail", "nl_status vocabulary", len(used - known),
+                    "unexpected status words: " + ", ".join(sorted(used - known))))
+    else:
+        mix = con.execute("SELECT status, count(*) FROM nl_status GROUP BY 1 ORDER BY 2 DESC")\
+                 .fetchall()
+        out.append(("ok", "NL status mix", None,
+                    ", ".join(f"{s} {human(c)}" for s, c in mix)))
+    conflict = one(con, "SELECT count(*) FILTER (WHERE conflict) FROM nl_status", default=0)
+    out.append(("ok" if conflict else "warn", "sources disagree", conflict,
+                f"{pct(conflict, rows)} of NL taxa: some source calls them native and another "
+                "alien. Kept as `conflict` instead of averaged away - usually GloNAF/SInAS "
+                "calling an alien while WCVP still calls the species native to the region"))
+    arrival, lo, hi, srcs = con.execute(
+        """SELECT count(arrival_year), min(arrival_year), max(arrival_year),
+                  string_agg(DISTINCT arrival_source, ',') FROM nl_status""").fetchone()
+    out.append(("ok" if arrival else "warn", "arrival years", arrival,
+                f"{lo}-{hi} ({', '.join(str(s) for s in srcs.split(',')) if srcs else 'none'})"
+                " - only SInAS dates arrivals; GRIIS-NL has eventDate on 1 of 376 rows"))
+    extinct = one(con, "SELECT count(*) FILTER (WHERE extinct) FROM nl_status", default=0)
+    out.append(("ok", "extinct in NL", extinct,
+                "records whose source flags the taxon as extinct in the Netherlands"))
+    # origin(): the range must be readable, not just counted
+    if has_table(con, "taxon_ranges"):
+        t_rows, with_native, shown = con.execute(
+            """SELECT count(*), count(*) FILTER (WHERE n_native_regions > 0),
+                      count(*) FILTER (WHERE native_regions IS NOT NULL
+                                       OR native_groups IS NOT NULL)
+               FROM taxon_ranges""").fetchone()
+        out.append(("ok", "taxon_ranges", t_rows,
+                    f"{human(with_native)} taxa have a native range in WCVP, "
+                    f"{human(shown)} of them with a readable list (region names up to 12, "
+                    "then the TDWG level-2 regions they fall in)"))
+        blind = one(con, """SELECT count(*) FROM taxon_ranges WHERE n_native_regions > 0
+                          AND native_regions IS NULL AND native_groups IS NULL""", default=0)
+        out.append(("ok" if not blind else "fail", "range readable", blind,
+                    "taxa counted as native somewhere but with no region shown - must be 0"))
+        if has_table(con, "tdwg_regions"):
+            missing = one(con, """SELECT count(DISTINCT r.region_code) FROM ranges r
+                              WHERE r.source = 'wcvp' AND NOT EXISTS
+                              (SELECT 1 FROM tdwg_regions g WHERE g.code = r.region_code)""",
+                        default=0)
+            gaz = one(con, "SELECT count(*) FROM tdwg_regions", default=0)
+            out.append(("ok" if not missing else "warn", "tdwg_regions", gaz,
+                        f"region codes -> names ({missing} WCVP codes not in the gazetteer)"))
+    return out
+
+
 def check_matching(con):
     """How much of the index can be matched by name alone - drives every fallback."""
     if not has_table(con, "plant_index"):
@@ -430,6 +541,7 @@ SECTIONS = [
     ("Distribution ranges", check_ranges),
     ("BHL literature", check_bhl),
     ("Books per plant (#4)", check_books),
+    ("Origin and Netherlands status (#5)", check_status),
     ("Matching notes", check_matching),
     ("Parked - decided against, not bugs", check_parked),
 ]

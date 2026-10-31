@@ -1,0 +1,12 @@
+region_scheme,code,region_name,country,include,note
+tdwg3,NET,Netherlands,Netherlands,yes,"WCVP distributions use TDWG level 3; NET is the Netherlands proper"
+glonaf,NLD,Netherlands,Netherlands,yes,"GloNAF 2.02 region code"
+iso,NL,Netherlands,Netherlands,yes,"GRIIS-NL uses countryCode = NL (its region_scheme is 'iso')"
+sinas,184,Netherlands,Netherlands,yes,"SInAS locationID; 'Netherlands' as location name"
+tdwg3,NLA,Netherlands Antilles,Netherlands Antilles,no,"1,068 WCVP rows. Must NOT be pulled in by a Netherlands filter"
+glonaf,ANT,Netherlands Antilles,Netherlands Antilles,no,"the same 2 letters 'ANT' mean Antarctica in TDWG3 - codes are only meaningful inside their scheme"
+glonaf,CUW,Curacao,Netherlands Antilles,no,GloNAF splits Curaçao out
+tdwg3,SUR,Suriname,Suriname,no,"former colony, its own TDWG region; 6,640 WCVP rows"
+sinas,8,Curaçao,Netherlands Antilles,no,SInAS locationID
+sinas,228,Suriname,Suriname,no,SInAS locationID
+tdwg3,ANT,Antarctica,Antarctica,no,"shows why every filter needs region_scheme as well as region_code"
