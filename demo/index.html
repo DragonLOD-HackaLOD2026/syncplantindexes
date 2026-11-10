@@ -18,7 +18,9 @@
 <body>
 <h1>Which books mention this plant?</h1>
 <p class="sub">Demo over the BHL book-mention index. Pick a plant - the ten most
-cited and the ten least cited (at least one mention) by book count.</p>
+cited and the ten least cited (at least one mention) by book count. Books run
+oldest to newest; "years cited" is when the plant appears in the book, and
+"citations" counts the mentioning pages across all digitised copies.</p>
 <p>
   <select id="plant">
     <option value="">choose a plant…</option>
@@ -57,12 +59,13 @@ document.getElementById('plant').addEventListener('change', async e => {
                   (p.books_dutch ? `, ${p.books_dutch} Dutch` : '');
     out.appendChild(h);
     const t = document.createElement('table');
-    t.innerHTML = '<tr><th>Book</th><th>Author</th><th>Published</th><th>Pages</th>' +
-                  '<th>Copy</th></tr>' +
+    t.innerHTML = '<tr><th>Book</th><th>Author</th><th>Published</th>' +
+                  '<th>Years cited</th><th>Citations</th><th>Copy</th></tr>' +
         p.citations.map(c => `<tr>
           <td><a href="${c.item_url || c.title_url}" target="_blank">${c.title}</a></td>
           <td>${c.book_author || ''}</td>
           <td class="num">${c.pub_year ?? ''}</td>
+          <td>${c.first_year ?? ''}${c.last_year && c.first_year != c.last_year ? '–' + c.last_year : ''}</td>
           <td class="num">${c.pages}</td>
           <td>${[c.institution, c.volume].filter(Boolean).join(' · ')}</td></tr>`).join('');
     out.appendChild(t);
